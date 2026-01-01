@@ -425,7 +425,7 @@ def main() -> None:
     target_path = args.video
     if not target_path.exists():
         print(f"❌ 路徑不存在: {target_path}")
-        return
+        sys.exit(0)
 
     if target_path.is_file():
         video_files = [target_path]
@@ -436,6 +436,7 @@ def main() -> None:
             return
         print(f"📂 找到 {len(video_files)} 個影片檔案，準備開始批次分析...")
 
+    execution_failed = False
     for idx, vf in enumerate(video_files, start=1):
         print(f"\n{'=' * 60}")
         print(f"[{idx}/{len(video_files)}] 🎬 處理影片: {vf.name} (Mode: {args.mode})")
@@ -445,9 +446,13 @@ def main() -> None:
         except Exception as e:
             print(f"❌ 處理 {vf.name} 時發生錯誤: {e}")
             traceback.print_exc()
+            execution_failed = True
 
     print("\n✅ 所有任務完成")
-
+    if execution_failed:
+        sys.exit(1) # 失敗
+    else:
+        sys.exit(0) # 成功
 
 if __name__ == "__main__":
     main()

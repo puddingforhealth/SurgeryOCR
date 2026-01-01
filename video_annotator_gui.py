@@ -2545,7 +2545,7 @@ class VideoAnnotator(tk.Frame):
 
             # 使用統一的路徑解析邏輯
             video_data_dir = resolve_video_analysis_dir(self.video_file_path)
-            video_data_dir = Path("test_profile8") / self.video_file_path.stem
+            # video_data_dir = Path("test_profile8") / self.video_file_path.stem
             change_frames = None
 
             # 嘗試 .jsonl 格式
