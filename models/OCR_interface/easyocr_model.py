@@ -18,7 +18,8 @@ class EasyOCRModel(BaseOCRModel):
                  # 以下是 easyocr.Reader 的其他可選參數，如果需要從外部配置的話
                  download_enabled=True, user_network_directory=None,
                  recog_network='standard', detector=True, recognizer=True, verbose=True,
-                 quantize=True, cudnn_benchmark=False, debug_output=True, **kwargs_extra_ignored): # 新增debug_output參數
+                 quantize=True, cudnn_benchmark=False, debug_output=True,
+                 skip_detector=False, **kwargs_extra_ignored): # 新增debug_output參數
 
         if lang_list is None:
             lang_list = ['en']
@@ -29,6 +30,10 @@ class EasyOCRModel(BaseOCRModel):
         self.confidence_threshold = confidence_threshold # 在此存儲，用於 recognize 方法
         self.allowlist = allowlist # 在此存儲，用於 recognize 方法
         self.debug_output = debug_output # 控制是否輸出詳細調試信息
+        # skip_detector: 跳過 CRAFT 文字偵測，直接把整張輸入當成唯一文字框。
+        # 本專案餵進來的是自己框好的緊裁切 ROI，再跑一次「找文字在哪」是重複勞動，
+        # 而偵測器約佔每次 OCR 耗時的一半。會改變辨識結果，因此預設關閉。
+        self.skip_detector = skip_detector
 
         # 準備僅easyocr.Reader構造函數支持的參數
         reader_params = {
@@ -125,17 +130,38 @@ class EasyOCRModel(BaseOCRModel):
 
         # 執行OCR - 獲取最原始的模型輸出
         try:
-            ocr_results = self.reader.readtext(
-                image,
-                allowlist=current_allowlist, # 在 readtext 中使用存儲的 allowlist
-                detail=1,
-                paragraph=False,
-                width_ths=0.7,  # 添加更多參數以獲得更詳細的控制
-                height_ths=0.7,
-                decoder='greedy',  # 可以嘗試 'beamsearch' 獲得更好結果
-                beamWidth=5,
-                batch_size=1
-            )
+            if self.skip_detector:
+                # 直接呼叫辨識器。horizontal_list/free_list 皆為 None 時，
+                # easyocr 會自動以 [[0, w, 0, h]] 當作唯一文字框，正是我們要的語意。
+                # 辨識器需要單通道灰階輸入。
+                if image.ndim == 3:
+                    grey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                else:
+                    grey = image
+                ocr_results = self.reader.recognize(
+                    grey,
+                    horizontal_list=None,
+                    free_list=None,
+                    allowlist=current_allowlist,
+                    detail=1,
+                    paragraph=False,
+                    decoder='greedy',
+                    beamWidth=5,
+                    batch_size=1,
+                    reformat=False,  # 輸入已是灰階單通道
+                )
+            else:
+                ocr_results = self.reader.readtext(
+                    image,
+                    allowlist=current_allowlist, # 在 readtext 中使用存儲的 allowlist
+                    detail=1,
+                    paragraph=False,
+                    width_ths=0.7,  # 添加更多參數以獲得更詳細的控制
+                    height_ths=0.7,
+                    decoder='greedy',  # 可以嘗試 'beamsearch' 獲得更好結果
+                    beamWidth=5,
+                    batch_size=1
+                )
             
             processing_time = time.time() - start_time
             

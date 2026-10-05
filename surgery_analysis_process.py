@@ -45,7 +45,8 @@ class OCRProcessor:
                  stable_frames: int = 0,
                  min_ocr_height: int = 0,
                  leading_minus_regions: Optional[List[str]] = None,
-                 value_formats: Optional[Dict[str, Dict]] = None):
+                 value_formats: Optional[Dict[str, Dict]] = None,
+                 skip_ocr_detector: bool = False):
         """
         ocr_input:      "binary" 餵二值圖給 OCR（機型1/2，不透明面板）；
                         "gray" 餵灰階原圖（機型3，半透明面板時二值圖易被背景汙染）。
@@ -56,6 +57,9 @@ class OCRProcessor:
                         成 '1'）：偵測到橫槓時從輸入裁掉再於結果前補 '-'。
         value_formats:  {region: {"decimal_places": n}} — 顯示格式固定但小數點太小
                         讀不到的區域，將無小數點的結果補回小數點。
+        skip_ocr_detector: 跳過 CRAFT 文字偵測，整張 ROI 直接送辨識器。ROI 已是
+                        緊裁切，偵測器約佔每次 OCR 一半耗時；會改變辨識結果，
+                        由 ocr_strategy.json 的 "ocr_detector": "whole_roi" 啟用。
         """
         self.stage_activation_dict = stage_activation_dict
         self.roi_header_dict = roi_header_dict
@@ -74,7 +78,8 @@ class OCRProcessor:
             gpu=torch.cuda.is_available(),
             lang_list=['en'],
             confidence_threshold=0.5,
-            debug_output=False
+            debug_output=False,
+            skip_detector=skip_ocr_detector
         )
         
         # State containers

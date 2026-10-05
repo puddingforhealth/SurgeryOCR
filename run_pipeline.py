@@ -70,6 +70,8 @@ def _initialize_machine_components(
         min_ocr_height=int(strategy.get("min_ocr_height", 0)),
         leading_minus_regions=strategy.get("leading_minus_regions"),
         value_formats=strategy.get("value_formats"),
+        # "whole_roi" 跳過 CRAFT 偵測器（ROI 已是緊裁切）；預設 "craft" 維持原行為
+        skip_ocr_detector=(strategy.get("ocr_detector", "craft") == "whole_roi"),
     )
     return stage_analyzer, pattern_name_map, ocr_processor, roi_dict
 
