@@ -26,7 +26,7 @@ from utils.cv_processing import calculate_rmse, calculate_ndarray_diff, binarize
 @dataclass
 class RegionPattern:
     pattern_id: int
-    array: np.ndarray  # reference pattern image (RGB for PEDAL, binary for others)
+    array: np.ndarray  # reference pattern image (RGB for rgb_gated regions, binary otherwise)
 
 
 @dataclass
@@ -74,17 +74,42 @@ def _load_region_patterns(cache_dir: Path, region_name: str) -> List[RegionPatte
     return patterns
 
 
-def _get_analysis_candidate(roi_input: np.ndarray, region_name: str, region_config: Dict, args: argparse.Namespace, frame_idx: int, input_is_bgr: bool = False) -> np.ndarray:
+MATCH_MODE_RGB_GATED = "rgb_gated"
+MATCH_MODE_BINARY = "binary"
+
+
+def resolve_match_mode(region_name: str, region_config: Dict) -> str:
+    """決定一個區域要用哪種比對方式 —— 依它的「宣告」，而不是它的「名字」。
+
+    模式：
+      "rgb_gated" 比對彩色裁切（可指定其中的精細子區域），並在裁切與前一幀差異
+                  很小時沿用上一幀的判定，不重跑樣板比對。機型1/2 的彩色踏板圖示。
+      "binary"    二值化後每幀與全部樣板比對。
+
+    向後相容：舊設定沒有 "match_mode" 欄位，而名為 PEDAL 的區域原本預設走 RGB
+    路徑、以 "pedal_rgb": false 退出，因此在沒有明確宣告時維持這個推導結果。
+    新增區域請直接在 diff_rule.json 寫 "match_mode"，不要依賴區域名稱。
+    """
+    mode = region_config.get("match_mode")
+    if mode:
+        return mode
+    if region_name == "PEDAL" and region_config.get("pedal_rgb", True):
+        return MATCH_MODE_RGB_GATED
+    return MATCH_MODE_BINARY
+
+
+def _get_analysis_candidate(roi_input: np.ndarray, region_name: str, region_config: Dict, args: argparse.Namespace, frame_idx: int, input_is_bgr: bool = False, match_mode: Optional[str] = None) -> np.ndarray:
     """根據區域配置，從原始ROI中準備用於分析的圖像陣列"""
     analysis_mode = region_config.get("analysis_mode", "full_roi")
-    is_pedal_debug = args.debug_pedal and region_name == "PEDAL"
+    if match_mode is None:
+        match_mode = resolve_match_mode(region_name, region_config)
+    is_pedal_debug = args.debug_pedal and match_mode == MATCH_MODE_RGB_GATED
 
     if is_pedal_debug:
-        print(f"\n[PEDAL DEBUG] Frame {frame_idx} | 步驟 2: 準備分析圖像")
+        print(f"\n[{region_name} DEBUG] Frame {frame_idx} | 步驟 2: 準備分析圖像")
         print(f"    - 分析模式: {analysis_mode}")
 
-    if region_name == "PEDAL" and region_config.get("pedal_rgb", True):
-        # 機型1/2 的 PEDAL 需要 RGB 格式（機型3 設 pedal_rgb=false 走一般二值路徑）
+    if match_mode == MATCH_MODE_RGB_GATED:
         if input_is_bgr:
             roi_rgb = cv2.cvtColor(roi_input, cv2.COLOR_BGR2RGB)
         else:
@@ -95,7 +120,7 @@ def _get_analysis_candidate(roi_input: np.ndarray, region_name: str, region_conf
             x1, y1, x2, y2 = sub_coords
             h, w = roi_rgb.shape[:2]
             if x2 > w or y2 > h or x1 < 0 or y1 < 0:
-                print(f"    [PEDAL DEBUG] 🔴 警告: 精細區域座標 {sub_coords} 超出ROI範圍 {(w, h)}")
+                print(f"    [{region_name}] 🔴 警告: 精細區域座標 {sub_coords} 超出ROI範圍 {(w, h)}")
                 return roi_rgb
             
             cand_array = roi_rgb[y1:y2, x1:x2]
@@ -131,7 +156,8 @@ def _match_best_pattern(
     args: argparse.Namespace,
     frame_idx: int,
     region_name: str,
-    region_config: Dict[str, Any]
+    region_config: Dict[str, Any],
+    match_mode: Optional[str] = None,
 ) -> Tuple[Optional[int], Optional[float]]:
     """從候選圖像陣列中匹配最佳樣板
     比對規則：
@@ -141,18 +167,20 @@ def _match_best_pattern(
        才將其視為一個確定的、唯一的匹配。
     4. 否則，即使找到了最接近的樣板，也因相似度不足而視為不匹配。
     """
-    is_pedal_debug = args.debug_pedal and region_name == "PEDAL"
+    if match_mode is None:
+        match_mode = resolve_match_mode(region_name, region_config)
+    is_pedal_debug = args.debug_pedal and match_mode == MATCH_MODE_RGB_GATED
     analysis_mode = region_config.get("analysis_mode", "full_roi")
 
     if is_pedal_debug:
-        print(f"[PEDAL DEBUG] Frame {frame_idx} | 步驟 3: 執行樣板比對")
+        print(f"[{region_name} DEBUG] Frame {frame_idx} | 步驟 3: 執行樣板比對")
         print(f"    - 候選圖像尺寸: {cand_array.shape}")
         print(f"    - 使用的門檻值: {rmse_threshold}")
         debug_pause(args, "即將開始逐一樣板比對")
 
     if not patterns:
         if is_pedal_debug:
-            print("    [PEDAL DEBUG] 🔴 錯誤: 沒有載入任何樣板，無法比對。")
+            print(f"    [{region_name}] 🔴 錯誤: 沒有載入任何樣板，無法比對。")
         return None, None
     
     cand_array = cand_array.astype(np.float32, copy=False)
@@ -160,7 +188,7 @@ def _match_best_pattern(
     best_rmse: float = float("inf")
 
     # 優化：將循環不變量移出循環
-    use_sub_roi = (region_name == "PEDAL" and analysis_mode == "sub_roi")
+    use_sub_roi = (match_mode == MATCH_MODE_RGB_GATED and analysis_mode == "sub_roi")
     sub_coords = region_config.get("sub_roi_coords") if use_sub_roi else None
     x1, y1, x2, y2 = (0, 0, 0, 0)
     if sub_coords:
@@ -175,7 +203,7 @@ def _match_best_pattern(
                 ref_for_comparison = full_ref_array[y1:y2, x1:x2]
             else:
                 if is_pedal_debug:
-                    print(f"    [PEDAL DEBUG] 🔴 警告: 樣板 ID {p.pattern_id} (尺寸 {full_ref_array.shape}) 太小，無法使用 sub_roi 座標 {sub_coords} 進行裁切。")
+                    print(f"    [{region_name}] 🔴 警告: 樣板 ID {p.pattern_id} (尺寸 {full_ref_array.shape}) 太小，無法使用 sub_roi 座標 {sub_coords} 進行裁切。")
                 continue
 
         # 優化：內聯 RMSE 計算，減少函數調用開銷
@@ -269,16 +297,24 @@ def build_segments(
     return segments
 
 
-def analyze_pedal_frame(
+def match_rgb_gated(
     current_roi: np.ndarray,
     prev_roi: Optional[np.ndarray],
+    prev_match: Tuple[Optional[int], Optional[float]],
     patterns: List[RegionPattern],
     region_config: Dict[str, Any],
     args: argparse.Namespace,
-    frame_idx: int
-) -> Tuple[Optional[int], Optional[float]]:
+    frame_idx: int,
+    region_name: str,
+) -> Tuple[Optional[int], Optional[float], int]:
     """
-    PEDAL 區域的優化分析函數：
+    "rgb_gated" 模式：帶時序閘門的彩色樣板比對。
+
+    呼叫端傳入上一幀的判定 (prev_match) 並接收新的判定，狀態不存在這個函式上，
+    所以多個區域可以各自走這條路徑而不互相污染。
+    回傳 (pattern_id, rmse, 實際比對的樣板數)。
+
+    原本的三段邏輯：
     1. 第一幀：直接與 cache 比對
     2. 後續幀：先與前一幀比較差異，超過 frame_diff_threshold 才進行 cache 比對
     3. Cache 比對時使用 cache_hit_threshold 判斷是否匹配
@@ -290,13 +326,9 @@ def analyze_pedal_frame(
     frame_diff_threshold = region_config.get("diff_threshold", 30.0)  # 前後幀差異門檻
     cache_hit_threshold = region_config.get("cache_hit_threshold", 40.0)  # cache 匹配門檻
     
-    # 記錄上一幀的匹配結果（簡單起見，使用全域變數或類屬性，這裡用靜態變數模擬）
-    if not hasattr(analyze_pedal_frame, 'prev_match_result'):
-        analyze_pedal_frame.prev_match_result = (None, None)
-    
     if is_pedal_debug:
         print("="*60)
-        print(f"[PEDAL DEBUG] Frame {frame_idx} | PEDAL 區域分析開始")
+        print(f"[{region_name} DEBUG] Frame {frame_idx} | 區域分析開始")
         print(f"    - 當前 ROI 尺寸: {current_roi.shape}")
         print(f"    - 前後幀差異門檻: {frame_diff_threshold}")
         print(f"    - Cache 匹配門檻: {cache_hit_threshold}")
@@ -306,13 +338,14 @@ def analyze_pedal_frame(
         if is_pedal_debug:
             print(f"    - 策略: 第一幀，直接進行 cache 比對")
         
-        cand_array = _get_analysis_candidate(current_roi, "PEDAL", region_config, args, frame_idx)
+        cand_array = _get_analysis_candidate(current_roi, region_name, region_config, args,
+                                             frame_idx, match_mode=MATCH_MODE_RGB_GATED)
         pid, rmse = _match_best_pattern(
             cand_array, patterns, cache_hit_threshold, args, frame_idx,
-            region_name="PEDAL", region_config=region_config
+            region_name=region_name, region_config=region_config,
+            match_mode=MATCH_MODE_RGB_GATED
         )
-        analyze_pedal_frame.prev_match_result = (pid, rmse)
-        return pid, rmse
+        return pid, rmse, len(patterns)
     
     # 後續幀：先計算前後幀差異
     frame_diff = calculate_ndarray_diff(prev_roi, current_roi, sub_coords)
@@ -323,10 +356,10 @@ def analyze_pedal_frame(
         
     if frame_diff <= frame_diff_threshold:
         # 差異不大，沿用前一幀的結果
-        prev_pid, prev_rmse = analyze_pedal_frame.prev_match_result
+        prev_pid, prev_rmse = prev_match
         if is_pedal_debug:
             print(f"    - 策略: 差異 ≤ {frame_diff_threshold}，沿用前一幀結果 (Pattern ID: {prev_pid})")
-        return prev_pid, prev_rmse
+        return prev_pid, prev_rmse, 0
     else:
         # 差異較大，進行 cache 比對
         if is_pedal_debug:
@@ -334,14 +367,13 @@ def analyze_pedal_frame(
             print(f"    - 將使用 cache 匹配門檻: {cache_hit_threshold}")
             debug_pause(args, "即將開始 cache 比對")
         
-        cand_array = _get_analysis_candidate(current_roi, "PEDAL", region_config, args, frame_idx)
+        cand_array = _get_analysis_candidate(current_roi, region_name, region_config, args,
+                                             frame_idx, match_mode=MATCH_MODE_RGB_GATED)
         pid, rmse = _match_best_pattern(
             cand_array, patterns, cache_hit_threshold, args, frame_idx,
-            region_name="PEDAL", region_config=region_config
+            region_name=region_name, region_config=region_config,
+            match_mode=MATCH_MODE_RGB_GATED
         )
-        
-        # 更新記錄的結果
-        analyze_pedal_frame.prev_match_result = (pid, rmse)
         
         if is_pedal_debug:
             print(f"    - Cache 比對結果: Pattern ID {pid}, RMSE: {rmse}")
@@ -350,7 +382,7 @@ def analyze_pedal_frame(
             else:
                 print(f"    - ❌ 沒有找到匹配的 Pattern (最小 RMSE {rmse:.2f} >= {cache_hit_threshold})")
         
-        return pid, rmse
+        return pid, rmse, len(patterns)
 
 
 # --------------------------------------------------------------------------
@@ -372,14 +404,14 @@ class StageAnalyzer:
             region: _load_region_patterns(cache_dir, region) for region in self.roi_dict.keys()
         }
         
-        # 狀態變數
+        # 每個區域各自的時序狀態：上一幀的裁切，以及上一幀的判定。
+        # 以區域為鍵，所以任意數量的區域都能走帶閘門的路徑而不互相污染，
+        # 同一支程式也能同時持有多個 analyzer（例如平行處理多支影片）。
         self.prev_frame_rois: Dict[str, Optional[np.ndarray]] = {r: None for r in self.roi_dict}
-        
-        # 專門為 PEDAL 優化準備的狀態
-        # 我們需要維護 analyze_pedal_frame 的內部狀態 (prev_match_result)
-        # 為了避免多個實例互相干擾，我們將狀態存在 instance 中
-        self.pedal_prev_match = (None, None) # (pid, rmse)
-        
+        self.prev_matches: Dict[str, Tuple[Optional[int], Optional[float]]] = {
+            r: (None, None) for r in self.roi_dict
+        }
+
         # [優化] 預先創建 mock_args 對象，避免每幀都創建新對象
         self._mock_args = argparse.Namespace(debug_pedal=debug, interactive=False)
         
@@ -390,10 +422,12 @@ class StageAnalyzer:
         self.template_compares = 0
         self._region_configs: Dict[str, Dict] = {}
         self._region_thresholds: Dict[str, float] = {}
+        self._region_modes: Dict[str, str] = {}
         for region_name in self.roi_dict.keys():
             config = self.diff_rules.get(region_name, {})
             self._region_configs[region_name] = config
             self._region_thresholds[region_name] = config.get("diff_threshold", 30.0)
+            self._region_modes[region_name] = resolve_match_mode(region_name, config)
     
     def process_frame(self, frame_bgr: np.ndarray, frame_idx: int, rmse_threshold: Optional[float] = None) -> Dict[str, Dict[str, Any]]:
         """
@@ -401,7 +435,7 @@ class StageAnalyzer:
         Returns:
             {
                 "STAGE": {"pattern_id": 1, "rmse": 12.5},
-                "PEDAL": {"pattern_id": None, "rmse": None},
+                "PEDAL": {"pattern_id": None, "rmse": None},   # 單標籤：一個區域一個 pattern
                 ...
             }
         """
@@ -425,37 +459,37 @@ class StageAnalyzer:
             roi_bgr = frame_bgr[y1:y2, x1:x2]
             
             pid, rmse = None, None
+            match_mode = self._region_modes[region_name]
+            patterns = self.region_to_patterns.get(region_name, [])
 
-            # 機型1/2 的 PEDAL 是彩色踏板圖示，走專用 RGB 分析路徑；
-            # 其他機型的 PEDAL（如機型3 的數字指示）設 "pedal_rgb": false 走一般二值比對
-            if region_name == "PEDAL" and region_config.get("pedal_rgb", True):
-                # PEDAL 需要 RGB 進行分析
+            if match_mode == MATCH_MODE_RGB_GATED:
+                # 彩色圖示（機型1/2 的踏板）：以原始 RGB 比對，並在裁切與前一幀
+                # 差異很小時沿用上一幀判定，不重跑樣板比對。
                 roi_rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)
-                
-                # 注入狀態
-                analyze_pedal_frame.prev_match_result = self.pedal_prev_match
-                
-                pid, rmse = analyze_pedal_frame(
+
+                pid, rmse, compares = match_rgb_gated(
                     roi_rgb, self.prev_frame_rois[region_name],
-                    self.region_to_patterns.get(region_name, []),
-                    region_config, self._mock_args, frame_idx
+                    self.prev_matches[region_name], patterns,
+                    region_config, self._mock_args, frame_idx, region_name
                 )
-                
-                # 保存狀態
-                self.pedal_prev_match = analyze_pedal_frame.prev_match_result
-                self.prev_frame_rois[region_name] = roi_rgb.copy() # 這裡還是存 RGB 以供下一幀比較
-                
+                self.template_compares += compares
+                self.prev_matches[region_name] = (pid, rmse)
+                self.prev_frame_rois[region_name] = roi_rgb.copy() # 存 RGB 以供下一幀比較
+
             else:
-                # 非 PEDAL 區域，傳入 BGR 並在 _get_analysis_candidate 內部轉 Gray -> Binary，省去 RGB 轉換
-                cand_array = _get_analysis_candidate(roi_bgr, region_name, region_config, self._mock_args, frame_idx, input_is_bgr=True)
-                patterns = self.region_to_patterns.get(region_name, [])
+                # 二值路徑：傳入 BGR，由 _get_analysis_candidate 內部轉 Gray -> Binary，省去 RGB 轉換
+                cand_array = _get_analysis_candidate(roi_bgr, region_name, region_config,
+                                                     self._mock_args, frame_idx,
+                                                     input_is_bgr=True, match_mode=match_mode)
                 self.template_compares += len(patterns)
                 if patterns:
                     pid, rmse = _match_best_pattern(
                         cand_array, patterns, threshold, self._mock_args, frame_idx,
-                        region_name=region_name, region_config=region_config
+                        region_name=region_name, region_config=region_config,
+                        match_mode=match_mode
                     )
-            
+                self.prev_matches[region_name] = (pid, rmse)
+
             results[region_name] = {"pattern_id": pid, "rmse": rmse}
             
         return results
@@ -484,9 +518,9 @@ def analyse_video(
 
     region_matches: Dict[str, List[Tuple[int, Optional[int], Optional[float]]]] = {r: [] for r in analyzer.roi_dict}
     
-    print(f"🚀 開始使用「優化的 PEDAL 前後幀比較法」分析影片: {video_path.name}")
+    print(f"🚀 開始逐幀樣板比對分析影片: {video_path.name}")
     if args.debug_pedal:
-        print("🕵️  已啟用 PEDAL 偵錯模式。")
+        print("🕵️  已啟用帶閘門區域（rgb_gated）的偵錯模式。")
 
     frames_to_process = total_frames
     if args.debug_pedal:
@@ -588,7 +622,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cache-dir", type=Path, default=Path("data/roi_img_caches/machine_1_2"), help="各區域快取圖片資料夾根目錄")
     p.add_argument("--threshold", type=float, default=None, help="全域RMSE門檻值 (若指定，會覆蓋diff_rule.json中的設定)")
     p.add_argument("--output-dir", type=Path, help="輸出資料夾 (預設: data/<video_name>)；若為資料夾模式將分別輸出至各自的 data/<video_name>/")
-    p.add_argument("--debug-pedal", action="store_true", help="啟用針對 PEDAL 區域的詳細偵錯模式")
+    p.add_argument("--debug-pedal", action="store_true", help="啟用 rgb_gated 模式區域（如機型1/2 的彩色踏板）的詳細偵錯輸出")
     p.add_argument("--interactive", action="store_true", help="在偵錯模式下啟用互動式暫停 (需搭配 --debug-pedal)")
     p.add_argument("--force", action="store_true", help="強制重新分析，忽略已存在的 stage_analysis.json")
     p.add_argument("--use-stream", action="store_true", help="強制使用串流讀取模式 (不依賴 disk cache)")

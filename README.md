@@ -56,6 +56,12 @@ This is the standard operating procedure for analyzing surgery videos. These com
 
 ## Golden-Regression Testing
 
+> Measured timings, and the optimisations that were tried and rejected, are recorded
+> in [`docs/pipeline-performance.md`](docs/pipeline-performance.md). Read it before
+> attempting performance work — a raw-pixel change gate, FFmpeg decode tuning and
+> skipping the OCR text detector have all been measured and ruled out (or limited
+> to specific machines).
+
 Most pipeline changes are meant to be behaviour-preserving (performance work,
 refactoring). Those are verified by running a fixed set of videos and diffing the
 outputs against recorded reference outputs — the pipeline is deterministic, so a
