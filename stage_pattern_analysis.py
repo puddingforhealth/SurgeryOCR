@@ -384,6 +384,10 @@ class StageAnalyzer:
         self._mock_args = argparse.Namespace(debug_pedal=debug, interactive=False)
         
         # [優化] 預先計算每個區域的配置和閾值
+        # Work counters, reported in run_stats.json. Template comparisons grow with
+        # (regions x templates x frames), so this is the number to watch when new
+        # pattern regions are added.
+        self.template_compares = 0
         self._region_configs: Dict[str, Dict] = {}
         self._region_thresholds: Dict[str, float] = {}
         for region_name in self.roi_dict.keys():
@@ -445,6 +449,7 @@ class StageAnalyzer:
                 # 非 PEDAL 區域，傳入 BGR 並在 _get_analysis_candidate 內部轉 Gray -> Binary，省去 RGB 轉換
                 cand_array = _get_analysis_candidate(roi_bgr, region_name, region_config, self._mock_args, frame_idx, input_is_bgr=True)
                 patterns = self.region_to_patterns.get(region_name, [])
+                self.template_compares += len(patterns)
                 if patterns:
                     pid, rmse = _match_best_pattern(
                         cand_array, patterns, threshold, self._mock_args, frame_idx,

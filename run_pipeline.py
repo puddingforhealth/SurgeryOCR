@@ -266,6 +266,10 @@ def run_pipeline(video_path: Path, base_output_dir: Path, mode: str = "detail", 
 
     frame_timestamps: List[float] = [] # 記錄每幀的時間戳 (ms)
     frame_source: Optional[PrefetchIterator] = None
+    # 分段計時，寫入 run_stats.json。用來判斷瓶頸在解碼、樣板比對還是 OCR，
+    # 以及驗證「輸出相同但工作量下降」—— 只有兩者同時成立才是真的優化。
+    stage_seconds = 0.0
+    ocr_seconds = 0.0
 
     try:
         # 初始化 tqdm
@@ -329,11 +333,15 @@ def run_pipeline(video_path: Path, base_output_dir: Path, mode: str = "detail", 
 
             else:
                 # 機型已確認：即時處理模式
+                _t = time.perf_counter()
                 stage_res = stage_analyzer.process_frame(frame_bgr, frame_idx)
+                stage_seconds += time.perf_counter() - _t
                 _collect_stage_matches(region_matches, stage_res, frame_idx)
 
                 if ocr_processor and roi_dict:
+                    _t = time.perf_counter()
                     ocr_processor.process_frame(frame_bgr, frame_idx, roi_dict, stage_res)
+                    ocr_seconds += time.perf_counter() - _t
 
                     # 非同步存 ROI 小圖
                     if mode == "detail":
@@ -366,7 +374,11 @@ def run_pipeline(video_path: Path, base_output_dir: Path, mode: str = "detail", 
 
     stage_total = total_frames if total_frames is not None else processed_frames
     _write_stage_analysis(video_name, analysis_dir, region_matches, stage_total, pattern_name_map)
-        
+
+    _write_run_stats(analysis_dir, processed_frames, time.time() - t0,
+                     frame_source, stage_analyzer, ocr_processor,
+                     stage_seconds, ocr_seconds)
+
     # 等待 IO (只有在有 async_saver 時才需要)
     if async_saver:
         print("⏳ 等待背景儲存完成...")
@@ -406,6 +418,57 @@ def _save_roi_images(
                 saver.save(roi_binary, bin_path)
             except Exception:
                 continue
+
+
+def _write_run_stats(
+    analysis_dir: Path,
+    processed_frames: int,
+    total_seconds: float,
+    frame_source: Optional[PrefetchIterator],
+    stage_analyzer: Optional[StageAnalyzer],
+    ocr_processor: Optional[OCRProcessor],
+    stage_seconds: float,
+    ocr_seconds: float,
+) -> None:
+    """Write run_stats.json: where the time went and how much work was done.
+
+    Two separate questions a performance change has to answer. Timings say whether
+    it got faster; the work counters (OCR calls, template comparisons, detected
+    changes) say whether it got faster by doing the same work more efficiently or
+    by quietly skipping some of it. An optimisation is only valid when the outputs
+    match the baseline *and* the counters move the way the change predicts.
+    """
+    per_frame_ms = (total_seconds / processed_frames * 1000) if processed_frames else 0.0
+    stats: Dict[str, Any] = {
+        "frames": processed_frames,
+        "total_seconds": round(total_seconds, 2),
+        "ms_per_frame": round(per_frame_ms, 3),
+        "timings": {
+            # Decode runs on a background thread; this is only the part of it that
+            # analysis could not hide, so it is the decode cost actually paid.
+            "decode_wait_seconds": round(frame_source.wait_seconds, 2) if frame_source else None,
+            "stage_seconds": round(stage_seconds, 2),
+            "ocr_seconds": round(ocr_seconds, 2),
+        },
+        "work": {
+            "template_compares": stage_analyzer.template_compares if stage_analyzer else None,
+        },
+    }
+
+    if ocr_processor is not None:
+        per_region = {}
+        for region, s in ocr_processor.stats.items():
+            per_region[region] = {
+                "change_count": s.get("change_count", 0),
+                "ocr_count": s.get("ocr_count", 0),
+                "ocr_seconds": round(s.get("ocr_time_total", 0.0), 2),
+            }
+        stats["work"]["ocr_calls"] = sum(v["ocr_count"] for v in per_region.values())
+        stats["work"]["changes_detected"] = sum(v["change_count"] for v in per_region.values())
+        stats["per_region"] = per_region
+
+    with open(analysis_dir / "run_stats.json", "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
 
 
 def _write_stage_analysis(

@@ -79,6 +79,9 @@ class PrefetchIterator:
         self._error = None
         self._sentinel = object()
         self._iterable = iterable
+        # Time the consumer spent blocked on an empty queue, i.e. the part of
+        # decoding that analysis was NOT able to hide.
+        self.wait_seconds = 0.0
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
 
@@ -107,14 +110,17 @@ class PrefetchIterator:
 
     def __next__(self):
         while True:
+            t0 = time.perf_counter()
             try:
                 item = self._queue.get(timeout=0.5)
             except queue.Empty:
+                self.wait_seconds += time.perf_counter() - t0
                 if not self._thread.is_alive():
                     if self._error is not None:
                         raise self._error
                     raise StopIteration
                 continue
+            self.wait_seconds += time.perf_counter() - t0
             if item is self._sentinel:
                 if self._error is not None:
                     raise self._error

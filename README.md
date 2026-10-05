@@ -86,6 +86,32 @@ The test set in `tools/golden_videos.json` covers all three machine types and bo
 pattern-matching paths (the RGB pedal icon on machines 1/2, the rule-binarized digit
 on machine 3). Add a video there when a new machine type or code path appears.
 
+> Wall-clock on the short videos varies noticeably with the OS file cache — a cold
+> first read is slower than a repeat. Compare timings from the `full` set, or repeat
+> a run, before believing a small delta.
+
+### Where the time went: `run_stats.json`
+
+Every run writes `run_stats.json` next to `stage_analysis.json`:
+
+```json
+{ "frames": 2367, "ms_per_frame": 6.031,
+  "timings": { "decode_wait_seconds": 7.31, "stage_seconds": 1.22, "ocr_seconds": 4.41 },
+  "work": { "template_compares": 59175, "ocr_calls": 98, "changes_detected": 79 },
+  "per_region": { "region1": { "change_count": 19, "ocr_count": 17, "ocr_seconds": 0.59 } } }
+```
+
+`decode_wait_seconds` is the time the main loop sat blocked waiting for a frame —
+decoding runs on a background thread, so this is the part of it that analysis could
+not hide, i.e. the decode cost actually paid.
+
+The `work` counters matter as much as the timings. Timings say whether a change got
+faster; the counters say whether it got faster by doing the same work more
+efficiently or by quietly skipping some of it. A performance change is only valid
+when the outputs match the baseline **and** the counters move the way the change
+predicts. `template_compares` is the one to watch when adding pattern regions: it
+grows as regions x templates x frames.
+
 ### Comparing two runs directly
 
 ```bash
