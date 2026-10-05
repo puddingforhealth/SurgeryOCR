@@ -17,7 +17,7 @@ from PIL import Image
 from extract_frame_cache import iterate_frames, get_frame_cache_dir
 from utils.get_configs import load_diff_rules, load_pattern_name_mapping, read_surgery_stage_rois
 from utils.get_paths import resolve_video_analysis_dir
-from utils.cv_processing import calculate_rmse, calculate_ndarray_diff
+from utils.cv_processing import calculate_rmse, calculate_ndarray_diff, binarize
 
 # -----------------------------
 # Data structures
@@ -83,8 +83,8 @@ def _get_analysis_candidate(roi_input: np.ndarray, region_name: str, region_conf
         print(f"\n[PEDAL DEBUG] Frame {frame_idx} | 步驟 2: 準備分析圖像")
         print(f"    - 分析模式: {analysis_mode}")
 
-    if region_name == "PEDAL":
-        # PEDAL 需要 RGB 格式
+    if region_name == "PEDAL" and region_config.get("pedal_rgb", True):
+        # 機型1/2 的 PEDAL 需要 RGB 格式（機型3 設 pedal_rgb=false 走一般二值路徑）
         if input_is_bgr:
             roi_rgb = cv2.cvtColor(roi_input, cv2.COLOR_BGR2RGB)
         else:
@@ -105,12 +105,21 @@ def _get_analysis_candidate(roi_input: np.ndarray, region_name: str, region_conf
         else:
             return roi_rgb
     else:
-        # 其他區域使用 OTSU 二值化 (從 Gray)
+        # 依 diff_rule 的 "binarize" 選擇方法：
+        #   "rule" -> 與 roi_picker 樣板一致的固定規則二值化（機型3）
+        #   其他   -> OTSU（機型1/2 樣板的產生方式）
+        if region_config.get("binarize") == "rule":
+            if input_is_bgr:
+                roi_bgr = roi_input
+            else:
+                roi_bgr = cv2.cvtColor(roi_input, cv2.COLOR_RGB2BGR)
+            return binarize(roi_bgr)
+
         if input_is_bgr:
             gray = cv2.cvtColor(roi_input, cv2.COLOR_BGR2GRAY)
         else:
             gray = cv2.cvtColor(roi_input, cv2.COLOR_RGB2GRAY)
-            
+
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
         return binary
 
@@ -348,14 +357,15 @@ def analyze_pedal_frame(
 # [NEW] StageAnalyzer Class for Pipeline Integration
 # --------------------------------------------------------------------------
 class StageAnalyzer:
-    def __init__(self, roi_config_path: Path, cache_dir: Path, debug: bool = False):
+    def __init__(self, roi_config_path: Path, cache_dir: Path, debug: bool = False,
+                 diff_rules_path: Optional[Path] = None):
         self.roi_config_path = roi_config_path
         self.cache_dir = cache_dir
         self.debug = debug
-        
+
         # 載入配置
         self.roi_dict = read_surgery_stage_rois(roi_config_path)
-        self.diff_rules = load_diff_rules()
+        self.diff_rules = load_diff_rules(diff_rules_path)
         
         # 載入 Patterns
         self.region_to_patterns: Dict[str, List[RegionPattern]] = {
@@ -411,8 +421,10 @@ class StageAnalyzer:
             roi_bgr = frame_bgr[y1:y2, x1:x2]
             
             pid, rmse = None, None
-            
-            if region_name == "PEDAL":
+
+            # 機型1/2 的 PEDAL 是彩色踏板圖示，走專用 RGB 分析路徑；
+            # 其他機型的 PEDAL（如機型3 的數字指示）設 "pedal_rgb": false 走一般二值比對
+            if region_name == "PEDAL" and region_config.get("pedal_rgb", True):
                 # PEDAL 需要 RGB 進行分析
                 roi_rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)
                 
@@ -568,7 +580,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Compare ROI of each frame against cached patterns and produce stage analysis JSON")
     p.add_argument("--video", "--video-path", dest="video", required=True, type=Path, help="影片路徑或資料夾 (.mp4 檔或包含多支影片的資料夾)")
     p.add_argument("--roi-config", type=Path, default=Path("config/surgery_stage_rois.json"), help="手術階段ROI配置檔")
-    p.add_argument("--cache-dir", type=Path, default=Path("data/roi_img_caches"), help="各區域快取圖片資料夾根目錄")
+    p.add_argument("--cache-dir", type=Path, default=Path("data/roi_img_caches/machine_1_2"), help="各區域快取圖片資料夾根目錄")
     p.add_argument("--threshold", type=float, default=None, help="全域RMSE門檻值 (若指定，會覆蓋diff_rule.json中的設定)")
     p.add_argument("--output-dir", type=Path, help="輸出資料夾 (預設: data/<video_name>)；若為資料夾模式將分別輸出至各自的 data/<video_name>/")
     p.add_argument("--debug-pedal", action="store_true", help="啟用針對 PEDAL 區域的詳細偵錯模式")

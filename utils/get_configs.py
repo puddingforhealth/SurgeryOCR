@@ -64,13 +64,12 @@ def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[
             
             if isinstance(machine_configs, dict):
                 # 新格式：{"1": [[coords], [header]], "2": [[coords], [header]]}
+                # 缺少該機型的 key 表示此區域不存在於該機型畫面，靜默跳過
                 if machine_id in machine_configs:
                     region_data = machine_configs[machine_id]
-                    if isinstance(region_data, list) and len(region_data) >= 1:
+                    if isinstance(region_data, list) and len(region_data) >= 1 and region_data[0]:
                         # 取第一个元素作为 ROI 座标
                         result[region_name] = region_data[0]
-                else:
-                    print(f"警告: 区域 '{region_name}' 没有机型 {machine_id} 的配置，跳过")
             else:
                 print(f"警告: 区域 '{region_name}' 配置格式错误，跳过")
         
@@ -175,9 +174,10 @@ def get_diff_rule_config_path() -> Path:
     """回傳 config/diff_rule.json 路徑"""
     return Path("config") / "diff_rule.json"
 
-def load_diff_rules() -> Dict[str, Any]:
-    """載入差異分析規則配置"""
-    config_path = get_diff_rule_config_path()
+def load_diff_rules(config_path: Optional[Path] = None) -> Dict[str, Any]:
+    """載入差異分析規則配置（可傳入機型專屬路徑，預設為 config/diff_rule.json）"""
+    if config_path is None:
+        config_path = get_diff_rule_config_path()
     
     # 預設配置
     default_config = {
@@ -355,6 +355,46 @@ def read_surgery_stage_rois(path: Path) -> Dict[str, List[int]]:
         return json.load(f)
 
 
+# ---------------------------------------------------------------------------
+# Machine-aware config resolution
+#
+# Machines 1 & 2 share one screen layout ("machine_1_2" pattern route);
+# machine 3 (UNITY) has its own. Per-route overrides live in
+# config/machine_<key>/<file>; anything without an override falls back to the
+# legacy shared file in config/.
+# ---------------------------------------------------------------------------
+
+def get_machine_key(machine_id) -> str:
+    """Map a machine id to its pattern-route key (shared assets directory name)."""
+    return "machine_3" if str(machine_id) == "3" else "machine_1_2"
+
+
+def resolve_machine_config_path(filename: str, machine_key: str) -> Path:
+    """Return config/<machine_key>/<filename> if it exists, else config/<filename>."""
+    override = Path("config") / machine_key / filename
+    if override.exists():
+        return override
+    return Path("config") / filename
+
+
+def get_pattern_cache_root(machine_key: str) -> Path:
+    """Root directory of pattern/template caches for a pattern route."""
+    return Path("data/roi_img_caches") / machine_key
+
+
+def load_ocr_strategy(machine_key: str) -> Dict[str, Any]:
+    """Per-route OCR strategy overrides (empty dict = pipeline defaults)."""
+    path = Path("config") / machine_key / "ocr_strategy.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️ 讀取 OCR strategy 失敗 ({path}): {e}，使用預設值")
+        return {}
+
+
 def get_roi_config_path() -> Path:
     """回傳 config/rois.json 路徑"""
     return Path("config") / "rois.json"
@@ -421,11 +461,8 @@ def save_roi_config(
         # 更新 regions 中對應機型的座標
         for region_name, roi_coords in roi_dict.items():
             if region_name not in data["regions"]:
-                # 初始化該區域，為兩種機型都創建空白配置
-                data["regions"][region_name] = {
-                    "1": [[], []],
-                    "2": [[], []]
-                }
+                # 初始化該區域（只建立目標機型的空白配置）
+                data["regions"][region_name] = {target_machine_id: [[], []]}
             
             region_data = data["regions"][region_name]
             

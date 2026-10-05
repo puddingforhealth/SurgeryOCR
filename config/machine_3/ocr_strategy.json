@@ -1,0 +1,14 @@
+{
+  "ocr_input": "gray",
+  "stable_frames": 4,
+  "min_ocr_height": 48,
+  "diff_threshold": 0.02,
+  "leading_minus_regions": [
+    "PEL"
+  ],
+  "value_formats": {
+    "INCISION": {
+      "decimal_places": 1
+    }
+  }
+}

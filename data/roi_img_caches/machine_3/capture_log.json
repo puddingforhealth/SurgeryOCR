@@ -1,0 +1,236 @@
+{
+  "pattern_regions": {
+    "STAGE": {
+      "coords": [
+        240,
+        36,
+        344,
+        52
+      ],
+      "patterns": {
+        "1": {
+          "frame": 14308,
+          "video": "0450713odlisa",
+          "label": "Quad"
+        },
+        "2": {
+          "frame": 0,
+          "video": "0450713odlisa",
+          "label": "Position"
+        },
+        "3": {
+          "frame": 4218,
+          "video": "0450713odlisa",
+          "label": "Registration"
+        },
+        "4": {
+          "frame": 4639,
+          "video": "0450713odlisa",
+          "label": "Incision"
+        },
+        "5": {
+          "frame": 4724,
+          "video": "0450713odlisa",
+          "label": "Capsulorhexis"
+        },
+        "6": {
+          "frame": 5736,
+          "video": "0450713odlisa",
+          "label": "Sculpt"
+        },
+        "7": {
+          "frame": 14867,
+          "video": "0430410 lensxod",
+          "label": "Quad"
+        },
+        "8": {
+          "frame": 25022,
+          "video": "0430410 lensxod",
+          "label": "Cortex"
+        },
+        "9": {
+          "frame": 29366,
+          "video": "0430410 lensxod",
+          "label": "Polish"
+        },
+        "10": {
+          "frame": 39033,
+          "video": "0430410 lensxod",
+          "label": "Toric"
+        },
+        "11": {
+          "frame": 39767,
+          "video": "0430410 lensxod",
+          "label": "Visco"
+        }
+      }
+    },
+    "PEDAL": {
+      "coords": [
+        1572,
+        40,
+        1593,
+        68
+      ],
+      "patterns": {
+        "1": {
+          "frame": 16449,
+          "video": "0450713odlisa",
+          "label": "2"
+        },
+        "2": {
+          "frame": 0,
+          "video": "0450713odlisa",
+          "label": "0"
+        },
+        "3": {
+          "frame": 12653,
+          "video": "0450713odlisa",
+          "label": "1"
+        }
+      }
+    }
+  },
+  "regions": {
+    "IOP": {
+      "header_coords": [
+        1815,
+        230,
+        1846,
+        243
+      ],
+      "header_frame": 22129,
+      "header_video": "0450713odlisa",
+      "value_coords": [
+        1806,
+        308,
+        1857,
+        337
+      ]
+    },
+    "ASP": {
+      "header_coords": [
+        1790,
+        441,
+        1873,
+        460
+      ],
+      "header_frame": 22873,
+      "header_video": "0450713odlisa",
+      "value_coords": [
+        1748,
+        482,
+        1915,
+        516
+      ],
+      "value_note": "widened for large working-value font",
+      "value_frame": 32701,
+      "value_video": "0450713odlisa"
+    },
+    "VAC": {
+      "header_coords": [
+        1794,
+        530,
+        1868,
+        545
+      ],
+      "header_frame": 23286,
+      "header_video": "0450713odlisa",
+      "value_coords": [
+        1748,
+        568,
+        1915,
+        610
+      ],
+      "value_note": "widened for large working-value font",
+      "value_frame": 11416,
+      "value_video": "0450713odlisa"
+    },
+    "PEL": {
+      "header_coords": [
+        1815,
+        703,
+        1850,
+        718
+      ],
+      "header_frame": 30227,
+      "header_video": "0450713odlisa",
+      "value_coords": [
+        1806,
+        745,
+        1852,
+        766
+      ],
+      "value_note": "widened left to include minus sign (was [1818,749,1846,763])"
+    },
+    "INFLOW": {
+      "header_coords": [
+        1798,
+        781,
+        1864,
+        796
+      ],
+      "header_frame": 30227,
+      "header_video": "0450713odlisa",
+      "value_coords": [
+        1814,
+        824,
+        1846,
+        849
+      ]
+    },
+    "INCISION": {
+      "header_coords": [
+        1798,
+        862,
+        1866,
+        878
+      ],
+      "header_frame": 30227,
+      "header_video": "0450713odlisa",
+      "value_coords": [
+        1814,
+        908,
+        1845,
+        926
+      ]
+    },
+    "REFLUX": {
+      "header_coords": [
+        1776,
+        974,
+        1877,
+        1014
+      ],
+      "header_frame": 30227,
+      "header_video": "0450713odlisa",
+      "value_coords": [
+        1814,
+        1053,
+        1840,
+        1068
+      ]
+    },
+    "CDE": {
+      "header_coords": [
+        1797,
+        24,
+        1837,
+        41
+      ],
+      "header_frame": 0,
+      "header_video": "0450713odlisa",
+      "value_coords": [
+        1778,
+        50,
+        1875,
+        82
+      ],
+      "value_note": "widened from user box [1782,54,1852,78]; value centered, allow 5+ chars"
+    }
+  },
+  "binarize": {
+    "hsv_s_thresh": 30,
+    "gray_thresh": 150
+  }
+}

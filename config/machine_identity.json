@@ -1,0 +1,29 @@
+{
+  "_comment": "Machine-type detection anchors. Each anchor is a binarized template compared (XOR diff ratio) against the binarized frame crop at 'coords'. Anchors are checked in list order; the first one whose diff < diff_threshold produces a vote. A machine type is confirmed after 'consecutive_votes' identical votes in a row. If the frame buffer exceeds 'max_buffer_frames' before confirmation, 'fallback_machine_id' is used.",
+  "anchors": [
+    {
+      "machine_id": 3,
+      "template": "data/roi_img_caches/machine_3/anchor.png",
+      "coords": [1797, 24, 1837, 41],
+      "diff_threshold": 0.15,
+      "description": "UNITY machine: 'CDE' label, visible from frame 0"
+    },
+    {
+      "machine_id": 1,
+      "template": "data/roi_img_caches/machine_1_2/roi_headers/region1.png",
+      "coords": [1710, 287, 1767, 313],
+      "diff_threshold": 0.03,
+      "description": "Machine A: region1 header at type-1 position (appears mid-surgery)"
+    },
+    {
+      "machine_id": 2,
+      "template": "data/roi_img_caches/machine_1_2/roi_headers/region1.png",
+      "coords": [1710, 187, 1767, 213],
+      "diff_threshold": 0.03,
+      "description": "Machine B: region1 header at type-2 position (appears mid-surgery)"
+    }
+  ],
+  "consecutive_votes": 5,
+  "fallback_machine_id": 1,
+  "max_buffer_frames": 100000
+}

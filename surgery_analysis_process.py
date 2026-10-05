@@ -35,16 +35,38 @@ from utils.get_paths import resolve_video_analysis_dir
 # [NEW] OCRProcessor Class for Pipeline Integration
 # --------------------------------------------------------------------------
 class OCRProcessor:
-    def __init__(self, 
-                 stage_activation_dict: Dict[str, List[int]], 
+    def __init__(self,
+                 stage_activation_dict: Dict[str, List[int]],
                  roi_header_dict: Dict[str, List[int]],
                  char_sets_dict: Dict[str, str],
-                 diff_threshold: float = 0.01):
-        
+                 diff_threshold: float = 0.01,
+                 header_template_dir: Optional[Path] = None,
+                 ocr_input: str = "binary",
+                 stable_frames: int = 0,
+                 min_ocr_height: int = 0,
+                 leading_minus_regions: Optional[List[str]] = None,
+                 value_formats: Optional[Dict[str, Dict]] = None):
+        """
+        ocr_input:      "binary" 餵二值圖給 OCR（機型1/2，不透明面板）；
+                        "gray" 餵灰階原圖（機型3，半透明面板時二值圖易被背景汙染）。
+        stable_frames:  >0 啟用去彈跳：偵測到變化後需連續穩定 N 幀才觸發 OCR，
+                        避免背景透過半透明面板造成的高頻誤觸。
+        min_ocr_height: OCR 前將過小的裁切圖放大到此高度（0 = 不放大）。
+        leading_minus_regions: 這些區域以連通元件偵測開頭負號（OCR 常把 '-' 誤讀
+                        成 '1'）：偵測到橫槓時從輸入裁掉再於結果前補 '-'。
+        value_formats:  {region: {"decimal_places": n}} — 顯示格式固定但小數點太小
+                        讀不到的區域，將無小數點的結果補回小數點。
+        """
         self.stage_activation_dict = stage_activation_dict
         self.roi_header_dict = roi_header_dict
         self.char_sets_dict = char_sets_dict
         self.diff_threshold = diff_threshold
+        self.header_template_dir = header_template_dir or _HEADER_TEMPLATE_DIR
+        self.ocr_input = ocr_input
+        self.stable_frames = stable_frames
+        self.min_ocr_height = min_ocr_height
+        self.leading_minus_regions = set(leading_minus_regions or [])
+        self.value_formats = value_formats or {}
         
         # Initialize OCR Model
         self.ocr_iface = get_ocr_model(
@@ -59,6 +81,12 @@ class OCRProcessor:
         self.prev_bins: Dict[str, Optional[np.ndarray]] = {}
         self.prev_active_states: Dict[str, bool] = {}
         self.cache_map: Dict[str, List[Tuple[np.ndarray, int]]] = {} # for multi-digit groups
+        # debounce state (stable_frames > 0)
+        self.pending_change: Dict[str, bool] = {}
+        self.stable_count: Dict[str, int] = {}
+        # 值層級去重：每區域最後一次辨識出的文字（deactivate 時重置）
+        # 像素變化觸發 OCR 後，若辨識結果與上一筆相同則併入前筆，不產生新紀錄
+        self.last_text: Dict[str, Optional[str]] = {}
         
         # Results containers
         self.multi_digit_groups: Dict[str, List[Dict]] = {}
@@ -77,6 +105,9 @@ class OCRProcessor:
                 self.multi_digit_groups[region_name] = []
                 self.single_digit_results[region_name] = []
                 self.stats[region_name] = {"ocr_time_total": 0.0, "ocr_count": 0, "change_count": 0}
+                self.pending_change[region_name] = False
+                self.stable_count[region_name] = 0
+                self.last_text[region_name] = None
 
     def process_frame(self, 
                       frame_bgr: np.ndarray, 
@@ -117,6 +148,8 @@ class OCRProcessor:
                 }
                 self.single_digit_results[region_name].append(deact_res)
                 self.stats[region_name]["change_count"] += 1
+                # 顯示消失後重置，值重新出現時（即使相同）會記一筆新事件
+                self.last_text[region_name] = None
                 # if region_name not in new_results: new_results[region_name] = []
                 # new_results[region_name].append(deact_res)
             
@@ -142,10 +175,23 @@ class OCRProcessor:
             else:
                 diff = calculate_average_binary_diff(prev_bin, curr_bin)
                 change = diff >= self.diff_threshold
-            
+
             # Update State
             self.prev_bins[region_name] = curr_bin
-            
+
+            # Debounce: 半透明面板下背景會造成高頻誤觸，改為
+            # 「變化後連續穩定 stable_frames 幀」才觸發一次 OCR
+            if self.stable_frames > 0:
+                if change:
+                    self.pending_change[region_name] = True
+                    self.stable_count[region_name] = 0
+                    change = False
+                elif self.pending_change.get(region_name):
+                    self.stable_count[region_name] = self.stable_count.get(region_name, 0) + 1
+                    if self.stable_count[region_name] >= self.stable_frames:
+                        self.pending_change[region_name] = False
+                        change = True
+
             if change:
                 self.stats[region_name]["change_count"] += 1
                 t1 = time.perf_counter()
@@ -165,44 +211,82 @@ class OCRProcessor:
                             # Cache Hit
                             group = self.multi_digit_groups[region_name][group_index]
                             group["matched_frames"].append(frame_idx)
+                            self.last_text[region_name] = group["ocr_text"]
                             from_cache = True
                             break
                 
                 if not from_cache:
+                    # 開頭負號偵測：'-' 常被 OCR 誤讀成 '1'，先從輸入裁掉、事後補回
+                    minus_prefix = ""
+                    cut_x = 0
+                    if region_name in self.leading_minus_regions:
+                        has_minus, cut_x = _detect_leading_minus(curr_bin)
+                        if has_minus:
+                            minus_prefix = "-"
+
+                    # OCR 輸入依策略選擇：binary（機型1/2）或 gray（機型3 半透明面板）
+                    if self.ocr_input == "gray":
+                        ocr_img = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+                    else:
+                        ocr_img = curr_bin
+                    if cut_x > 0:
+                        ocr_img = ocr_img[:, cut_x:]
+                    if self.ocr_input == "gray" and self.min_ocr_height and ocr_img.shape[0] < self.min_ocr_height:
+                        scale = self.min_ocr_height / ocr_img.shape[0]
+                        ocr_img = cv2.resize(ocr_img, None, fx=scale, fy=scale,
+                                             interpolation=cv2.INTER_CUBIC)
+
                     # 優化：直接傳入 numpy array，省去 PIL 轉換
-                    ocr_result, conf = self.ocr_iface.recognize(curr_bin, allowlist=custom_allowlist)
+                    ocr_result, conf = self.ocr_iface.recognize(ocr_img, allowlist=custom_allowlist)
                     ocr_calls += 1
-                    
-                    if not ocr_result:
+
+                    if not ocr_result and self.ocr_input != "gray":
                         trimmed = trim_black_borders(curr_bin, max_border=1)
                         if trimmed.size > 0 and trimmed.shape != curr_bin.shape:
                              ocr_result, conf = self.ocr_iface.recognize(trimmed, allowlist=custom_allowlist)
                              ocr_calls += 1
+
+                    if ocr_result:
+                        if minus_prefix and not ocr_result.startswith("-"):
+                            ocr_result = minus_prefix + ocr_result
+                        ocr_result = _apply_value_format(ocr_result, self.value_formats.get(region_name))
                     
                     if is_multi_digit:
                         if ocr_result:
-                            new_group = {
-                                "type": "multi_digit_group",
-                                "source_frame": frame_idx,
+                            groups = self.multi_digit_groups[region_name]
+                            if (self.last_text.get(region_name) == ocr_result
+                                    and groups and groups[-1]["ocr_text"] == ocr_result):
+                                # 值未變（只是像素被背景擾動）：併入前一筆，不產生新紀錄
+                                groups[-1]["matched_frames"].append(frame_idx)
+                                self.cache_map[region_name].append((curr_bin, len(groups) - 1))
+                            else:
+                                new_group = {
+                                    "type": "multi_digit_group",
+                                    "source_frame": frame_idx,
+                                    "ocr_text": ocr_result,
+                                    "confidence": conf,
+                                    "matched_frames": [frame_idx],
+                                    "setting": True
+                                }
+                                groups.append(new_group)
+                                self.cache_map[region_name].append((curr_bin, len(groups) - 1))
+                                found_res = new_group
+                            self.last_text[region_name] = ocr_result
+                    else:
+                        # 空結果或與上一筆相同的值：不記錄（去重）
+                        if ocr_result and ocr_result != self.last_text.get(region_name):
+                            is_setting = _determine_if_setting_value(ocr_result, curr_bin, region_name, frame_idx)
+                            res = {
+                                "type": "single_digit",
+                                "frame": frame_idx,
                                 "ocr_text": ocr_result,
                                 "confidence": conf,
-                                "matched_frames": [frame_idx],
-                                "setting": True
+                                "setting": is_setting
                             }
-                            self.multi_digit_groups[region_name].append(new_group)
-                            self.cache_map[region_name].append((curr_bin, len(self.multi_digit_groups[region_name])-1))
-                            found_res = new_group
-                    else:
-                        is_setting = _determine_if_setting_value(ocr_result, curr_bin, region_name, frame_idx)
-                        res = {
-                            "type": "single_digit",
-                            "frame": frame_idx,
-                            "ocr_text": ocr_result,
-                            "confidence": conf,
-                            "setting": is_setting
-                        }
-                        self.single_digit_results[region_name].append(res)
-                        found_res = res
+                            self.single_digit_results[region_name].append(res)
+                            found_res = res
+                        if ocr_result:
+                            self.last_text[region_name] = ocr_result
 
                 self.stats[region_name]["ocr_time_total"] += (time.perf_counter() - t1)
                 self.stats[region_name]["ocr_count"] += ocr_calls
@@ -216,7 +300,8 @@ class OCRProcessor:
     def _check_active(self, region_name, frame_idx, current_stage_pattern, frame_bgr):
         # 1. Check Header
         if self.roi_header_dict and frame_bgr is not None:
-             if not _is_active_header(frame_bgr, region_name, self.roi_header_dict, frame_idx):
+             if not _is_active_header(frame_bgr, region_name, self.roi_header_dict, frame_idx,
+                                      template_dir=str(self.header_template_dir)):
                  return False
                  
         # 2. Check Stage Config
@@ -249,15 +334,55 @@ class OCRProcessor:
             
             # print(f"[OCR] Saved {len(all_results)} results to {save_path.name}")
 
+def _detect_leading_minus(binary: np.ndarray) -> Tuple[bool, int]:
+    """偵測二值圖最左側是否為負號橫槓。
+
+    負號特徵：比數字矮得多（高度 ≤ 數字高度的 45%）、寬≥高、垂直位置在中段。
+    Returns: (has_minus, cut_x) — cut_x 為裁掉負號後 OCR 輸入的起始欄位。
+    """
+    try:
+        num, _labels, stats, _cent = cv2.connectedComponentsWithStats(binary, 8)
+    except Exception:
+        return False, 0
+    comps = [stats[i] for i in range(1, num) if stats[i][4] >= 3]
+    if len(comps) < 2:
+        return False, 0
+    comps.sort(key=lambda s: s[0])
+    first = comps[0]
+    digit_h = max(c[3] for c in comps[1:])
+    x, y, w, h, _area = first
+    img_h = binary.shape[0]
+    y_center = y + h / 2.0
+    is_minus = (h <= 0.45 * digit_h and w >= h and
+                0.25 * img_h < y_center < 0.75 * img_h)
+    if is_minus:
+        return True, int(x + w + 1)
+    return False, 0
+
+
+def _apply_value_format(text: str, fmt: Optional[Dict]) -> str:
+    """依區域顯示格式修正 OCR 結果（目前支援固定小數位數的補點）。"""
+    if not fmt or not text:
+        return text
+    places = int(fmt.get("decimal_places", 0))
+    if places > 0 and "." not in text:
+        sign = "-" if text.startswith("-") else ""
+        digits = text.lstrip("-")
+        if digits.isdigit() and len(digits) > places:
+            return f"{sign}{digits[:-places]}.{digits[-places:]}"
+    return text
+
+
 # --------------------------------------------------------------------------
 # Original Utilities (Kept for backward compatibility)
 # --------------------------------------------------------------------------
 
-_HEADER_TEMPLATE_DIR = Path("data/roi_img_caches/roi_headers")
+_HEADER_TEMPLATE_DIR = Path("data/roi_img_caches/machine_1_2/roi_headers")
 
 @lru_cache(maxsize=None)
-def _load_header_template(region_name: str) -> Optional[np.ndarray]:
-    cache_path = _HEADER_TEMPLATE_DIR / f"{region_name}.png"
+def _load_header_template(region_name: str, template_dir: Optional[str] = None) -> Optional[np.ndarray]:
+    base = Path(template_dir) if template_dir else _HEADER_TEMPLATE_DIR
+    cache_path = base / f"{region_name}.png"
     if not cache_path.exists():
         return None
     try:
@@ -275,7 +400,8 @@ def _is_active_header(
     region_name: str,
     roi_header_dict: Dict[str, List[int]] | None,
     frame_idx: int = 0,
-    diff_threshold: float = 0.2
+    diff_threshold: float = 0.2,
+    template_dir: Optional[str] = None
 ) -> bool:
     """
     檢查指定region的header是否在當前frame中active（與快取圖像匹配）
@@ -287,7 +413,7 @@ def _is_active_header(
     if len(header_coords) != 4:
         return True
 
-    cached_header = _load_header_template(region_name)
+    cached_header = _load_header_template(region_name, template_dir)
     if cached_header is None:
         return True
 

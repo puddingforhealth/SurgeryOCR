@@ -59,3 +59,9 @@ release_env/
 
 #debugging/ profiling files
 *.pstats
+
+# VS Code user-specific settings (interpreter path is machine-specific)
+.vscode/
+
+# golden-regression baselines and benchmark outputs (tools/compare_analysis.py)
+runs/

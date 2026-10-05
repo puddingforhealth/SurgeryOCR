@@ -1,0 +1,17 @@
+{
+  "STAGE": {
+    "analysis_mode": "full_roi",
+    "binarize": "rule",
+    "diff": "rmse",
+    "diff_threshold": 60.0,
+    "description": "Machine-3 stage word (rule-binarized template RMSE)"
+  },
+  "PEDAL": {
+    "analysis_mode": "full_roi",
+    "pedal_rgb": false,
+    "binarize": "rule",
+    "diff": "rmse",
+    "diff_threshold": 60.0,
+    "description": "Machine-3 pedal digit (rule-binarized template RMSE, not the machine-1 RGB pedal icon)"
+  }
+}

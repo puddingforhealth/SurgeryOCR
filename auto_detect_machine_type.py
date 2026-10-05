@@ -22,7 +22,7 @@ from utils.get_configs import (
 from utils.get_paths import resolve_video_analysis_dir
 
 # --------------------------------------------------------------------------
-# [NEW] MachineDetector Class for Pipeline Integration
+# MachineDetector: multi-anchor machine-type detection (config-driven)
 # --------------------------------------------------------------------------
 @lru_cache(maxsize=None)
 def _load_reference_header_image_cached(ref_path: str) -> Optional[np.ndarray]:
@@ -42,42 +42,79 @@ def _load_reference_header_image_cached(ref_path: str) -> Optional[np.ndarray]:
 
 class MachineDetector:
     """
-    用於單次讀取 (Single-Pass) 流程的機型偵測器。
-    不依賴檔案讀取，直接接受 Frame 與參數進行比對。
-    """
-    def __init__(self, ref_image_path: Path = Path("data/roi_img_caches/roi_headers/region1.png"), threshold: float = 0.03):
-        self.ref_image_path = ref_image_path
-        self.threshold = threshold
-        self.ref_binary = _load_reference_header_image_cached(str(ref_image_path))
-        if self.ref_binary is None:
-            print(f"[MachineDetector] ⚠️ Warning: 無法載入參考圖: {ref_image_path}")
+    多錨點機型偵測器 (config/machine_identity.json)。
 
-    def detect_from_frame(self, frame_bgr: np.ndarray, region1_coords: List[int]) -> Optional[int]:
-        """
-        從單一 Frame 判斷機型。
-        
-        Args:
-            frame_bgr: 完整的影片幀 (BGR)
-            region1_coords: [x1, y1, x2, y2] 用於裁切 Header
-            
-        Returns:
-            1 or 2 (Machine ID), or None if failed
-        """
-        if self.ref_binary is None:
-            print("[MachineDetector] 參考圖未載入，無法偵測")
+    每個機型定義一個錨點：畫面固定位置的二值化樣板。逐幀比對所有錨點，
+    第一個 diff < 門檻的錨點產生一票；連續 consecutive_votes 幀投給同一
+    機型即確認。所有錨點都不匹配時回傳 None（尚無法判定，呼叫端應繼續
+    buffer 等待）。
+    """
+
+    def __init__(self, config_path: Path = Path("config/machine_identity.json")):
+        self.anchors: List[Dict] = []
+        self.consecutive_votes = 5
+        self.fallback_machine_id = 1
+        self.max_buffer_frames = 100000
+        self._last_vote: Optional[int] = None
+        self._streak = 0
+
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception as e:
+            print(f"[MachineDetector] ⚠️ 無法載入 {config_path}: {e}")
+            return
+
+        self.consecutive_votes = int(config.get("consecutive_votes", 5))
+        self.fallback_machine_id = int(config.get("fallback_machine_id", 1))
+        self.max_buffer_frames = int(config.get("max_buffer_frames", 100000))
+
+        for entry in config.get("anchors", []):
+            template = _load_reference_header_image_cached(str(entry["template"]))
+            if template is None:
+                print(f"[MachineDetector] ⚠️ 無法載入錨點樣板: {entry['template']}")
+                continue
+            self.anchors.append({
+                "machine_id": int(entry["machine_id"]),
+                "template": template,
+                "coords": entry["coords"],
+                "diff_threshold": float(entry["diff_threshold"]),
+            })
+
+        if not self.anchors:
+            print("[MachineDetector] ⚠️ 沒有可用的錨點，機型偵測停用")
+
+    def detect_from_frame(self, frame_bgr: np.ndarray) -> Optional[int]:
+        """單幀判斷：回傳第一個匹配錨點的機型，全部不匹配則回傳 None。"""
+        for anchor in self.anchors:
+            crop_binary = extract_and_binarize_header(frame_bgr, anchor["coords"])
+            if crop_binary is None or crop_binary.shape != anchor["template"].shape:
+                continue
+            diff = calculate_pixel_difference_ratio(crop_binary, anchor["template"])
+            if diff is not None and diff < anchor["diff_threshold"]:
+                return anchor["machine_id"]
+        return None
+
+    def update(self, frame_bgr: np.ndarray) -> Optional[int]:
+        """串流 API：連續 consecutive_votes 幀投給同一機型才確認並回傳。"""
+        vote = self.detect_from_frame(frame_bgr)
+        if vote is None:
+            self._last_vote = None
+            self._streak = 0
             return None
-            
-        header_binary = extract_and_binarize_header(frame_bgr, region1_coords)
-        if header_binary is None:
-            return None
-            
-        diff_ratio = calculate_pixel_difference_ratio(header_binary, self.ref_binary)
-        if diff_ratio is None:
-            return None
-            
-        machine_id = 1 if diff_ratio < self.threshold else 2
-        # print(f"[MachineDetector] Diff: {diff_ratio:.4f} -> Type {machine_id}")
-        return machine_id
+        if vote == self._last_vote:
+            self._streak += 1
+        else:
+            self._last_vote = vote
+            self._streak = 1
+        if self._streak >= self.consecutive_votes:
+            return vote
+        return None
+
+    def reset(self) -> None:
+        """重置投票狀態（換影片時呼叫）。"""
+        self._last_vote = None
+        self._streak = 0
 
 # --------------------------------------------------------------------------
 # Original Utilities (Kept for backward compatibility)
@@ -276,7 +313,7 @@ def detect_machine_type_for_video(
     video_name: str, 
     video_dir: Path, 
     data_root: Path = Path("data"),
-    ref_image_path: Path = Path("data/roi_img_caches/roi_headers/region1.png"),
+    ref_image_path: Path = Path("data/roi_img_caches/machine_1_2/roi_headers/region1.png"),
     threshold: float = 0.03,
     verbose: bool = True,
     *,
@@ -319,15 +356,12 @@ def detect_machine_type_for_video(
             print(f"  ⚠️  無法從 frame_cache 取得幀 {detection_frame}")
         return None
     
-    # 5. 獲取 region1 的 header 座標
-    header_config = load_roi_header_config(video_name=None)  # 使用默認（機型1）
-    if "region1" not in header_config:
-        return None
-    header_coords = header_config["region1"]
-    
-    # 使用 Class 進行比對
-    detector = MachineDetector(ref_image_path, threshold)
-    machine_id = detector.detect_from_frame(frame_bgr, header_coords)
+    # 5. 使用多錨點偵測器比對（座標與門檻由 config/machine_identity.json 定義）
+    detector = MachineDetector()
+    machine_id = detector.detect_from_frame(frame_bgr)
+    if machine_id is None:
+        # 保留舊行為：偵測幀上所有錨點皆不匹配時視為機型 2
+        machine_id = 2
     
     if verbose and machine_id:
         print(f"  ✓  判定機型: {machine_id}")
@@ -393,7 +427,7 @@ def main():
     parser.add_argument(
         "--ref-image",
         type=Path,
-        default=Path("data/roi_img_caches/roi_headers/region1.png"),
+        default=Path("data/roi_img_caches/machine_1_2/roi_headers/region1.png"),
         help="參考圖片路徑（機型1標準）"
     )
     

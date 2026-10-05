@@ -1,0 +1,20 @@
+{
+  "STAGE": {
+    "1": "Quad",
+    "2": "Position",
+    "3": "Registration",
+    "4": "Incision",
+    "5": "Capsulorhexis",
+    "6": "Sculpt",
+    "7": "Quad",
+    "8": "Cortex",
+    "9": "Polish",
+    "10": "Toric",
+    "11": "Visco"
+  },
+  "PEDAL": {
+    "1": "2",
+    "2": "0",
+    "3": "1"
+  }
+}

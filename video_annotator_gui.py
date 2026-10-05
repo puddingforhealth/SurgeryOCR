@@ -3564,7 +3564,7 @@ class VideoAnnotator(tk.Frame):
     def _load_roi_cache(self, region_name: str) -> Optional[np.ndarray]:
         """載入指定區域的最新快取圖像"""
         try:
-            cache_dir = Path("data/roi_img_caches") / region_name
+            cache_dir = Path("data/roi_img_caches/machine_1_2") / region_name
             if not cache_dir.exists():
                 return None
                 
