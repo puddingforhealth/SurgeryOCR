@@ -90,37 +90,60 @@ through OpenCV is not available without rebuilding it. Lowering the decode floor
 means replacing the reader (PyNvVideoCodec, decord) and keeping crops on the GPU —
 a separate project, not a configuration change.
 
-**Skipping the CRAFT text detector, on machine 1.** EasyOCR's `readtext` runs text
-detection before recognition, and detection is about half of each call. Calling
-`Reader.recognize` with no bounding box (easyocr then treats the whole crop as one
-text box) is 1.56x faster per call — 26.31 ms -> 16.85 ms — but on
-`1131009何素珠od` it agrees with the current path on only 59.7% of 6,906 calls:
+**Skipping the CRAFT text detector.** EasyOCR's `readtext` runs text detection
+before recognition, and detection is roughly half of each call. Calling
+`Reader.recognize` with no bounding box — easyocr then treats the whole crop as a
+single text box — is substantially faster, and substantially less accurate. Measured
+with `tools/ab_ocr_detector.py`, which records the exact images a real run sends to
+OCR and replays them through both paths:
 
-| outcome | count | share of calls |
+| | machine 1 (1131009何素珠od) | machine 3 (0450713odlisa) |
 |---|---:|---:|
-| current path read a value, detector-free path read nothing | 2,452 | 35.5% |
-| current path read nothing, detector-free path read a value | 304 | 4.4% |
-| both read a value, values differ | 26 | 0.4% |
+| OCR calls compared | 6,906 | 3,234 |
+| current path, ms/call | 26.31 | 45.19 |
+| detector-free, ms/call | 16.85 | 16.43 |
+| speed-up | 1.56x | 2.75x |
+| **agreement** | **59.7%** | **51.5%** |
+| current read a value, detector-free read nothing | 2,452 (35.5% of calls) | 782 (24.2%) |
+| both read a value, values differ | 26 (0.4%) | 620 (19.2%) |
+| current read nothing, detector-free read a value | 304 (4.4%) | 167 (5.2%) |
 
-The current path's confidence on the 2,452 readings the other path loses has a
-median of 1.000, so these are not marginal cases. The cause is visible in the
-disagreements where both paths read something: `'15 60'` -> `'1560'`,
-`'350 700+ 600'` -> `'35000500'`. Machine 1's value regions are 196x72 panel areas
-holding both the large operating value and the small setting value, not single-line
-crops — so detection is doing real work by locating one line inside the panel, and
-treating the whole ROI as one box runs the elements together.
+The current path's confidence on the readings the other path loses has a median of
+1.000 on both machines, so these are not marginal cases. The cause is visible in the
+disagreements where both paths read something:
 
-The flag therefore stays off by default (`"ocr_detector": "craft"`). It is per
-machine because machine 3's regions are genuinely tight single-value crops
-(`INCISION` 31x18, `REFLUX` 26x15), where the premise may hold; see
-`tools/ab_ocr_detector.py` for how to re-run the comparison.
+```
+machine 1:  A='15 60'        B='1560'       A='350 700+ 600'  B='35000500'
+machine 3:  A='50 200'       B='50200'      A='30 37 30'      B='303730'
+            A='90'           B='09'         A='28 40'         B='2840'
+```
+
+The configured value regions are **panel areas holding several text elements**, not
+single-line crops — machine 1's `region1`-`region3` are 196x72 and carry both the
+large operating value and the small setting value; machine 3's `ASP` is 167x34 and
+`VAC` 167x42. Detection is therefore doing necessary work by locating one value
+inside the panel, and treating the whole ROI as one box runs the elements together
+or picks up a neighbouring glyph. The premise that the ROIs are already tight crops
+is wrong for both machines.
+
+The flag therefore stays off by default (`"ocr_detector": "craft"`). It is kept, per
+machine, because the result above identifies a real opportunity rather than closing
+one: **if a region declared a box per value instead of one box per panel, the
+detector could be skipped for a 1.6-2.75x reduction in OCR cost**, which is 57-70%
+of the runtime on videos with dense readings. That needs re-annotation with
+`roi_picker.py` (one box per value) and a per-value box list in the region
+declaration — not a code-only change, and an accuracy decision rather than a
+performance one. `tools/ab_ocr_detector.py` re-runs the comparison after any such
+change.
 
 ## Open findings not yet acted on
 
-- On `1131009何素珠od` the current path returns nothing on 304 calls where the
-  detector-free path reads a value with median confidence 1.000. Those readings are
-  dropped from the output today, so detection is occasionally failing on text the
-  recognizer can read.
+- The current path returns nothing on 304 of 6,906 calls (machine 1) and 167 of
+  3,234 (machine 3) where the detector-free path reads a value with median
+  confidence 1.000. Those readings are dropped from the output today, so detection
+  is occasionally failing on text the recognizer can read — worth revisiting with
+  easyocr's `min_size` (default 20), which filters small detected boxes and may be
+  rejecting text in the smallest regions (`REFLUX` is 26x15).
 - `region7` has no entry in `config/ocr_char_sets.json` and falls back to the
   default allowlist. It records 31 changes but makes 58 OCR calls on
   `2025-08-16_135759`, because the empty-result retry path fires almost every time.
