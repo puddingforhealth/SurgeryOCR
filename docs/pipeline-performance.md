@@ -136,6 +136,45 @@ declaration — not a code-only change, and an accuracy decision rather than a
 performance one. `tools/ab_ocr_detector.py` re-runs the comparison after any such
 change.
 
+## Data-quality finding: machine 3 ASP / VAC regions span three values
+
+Not a performance issue, but found while measuring one, and it affects output that
+already exists.
+
+The UNITY "Asp Flow" and "Vacuum" panels are ramp widgets showing three numbers —
+start, current and end — above a triangle whose apex marks the current position.
+The configured ROIs cover all three:
+
+| region | box | size | values inside |
+|---|---|---:|---|
+| `ASP` | `[1748, 482, 1915, 516]` | 167x34 | `30` `37` `30` |
+| `VAC` | `[1748, 568, 1915, 610]` | 167x42 | `350` `725` `600` |
+
+On `0450713odlisa` this shows up directly in the output: 60 of 349 `ASP` readings
+(17.2%) and 61 of 339 `VAC` readings (18.0%) are several numbers concatenated —
+`'30 37 30'` 23 times, `'350 725 600'` 21 times. EasyOCR detects each number as its
+own text box and the wrapper joins the results left to right, so the recorded
+`ocr_text` is faithful to the ROI; the ROI is what is wrong.
+
+The remaining single-number readings are the more serious problem, because nothing
+records *which* of the three numbers was read. A sample of consecutive `ASP`
+readings:
+
+```
+11293 '3'    11423 '5'    11591 '37 30'   11615 '30 37 30'   11724 '5'
+11829 '12'   11915 '9'    11931 '10'      11954 '30 37 30'   11990 '33'
+```
+
+So the `ASP` and `VAC` series on machine 3 cannot currently be read as a time series
+of one quantity. Fixing it means deciding which of the three numbers is wanted and
+re-annotating a box around just that one — which is the same change that would allow
+skipping the text detector, so it buys data quality and a 2.75x OCR speed-up at
+once. Whether the centre value's box can be fixed at all depends on whether the ramp
+apex moves horizontally; that needs checking against the machine.
+
+Machine 1/2 regions have the same shape of problem far more rarely: `region2` and
+`region3` show a space in 0.2-0.3% of readings, `region5` in 2 of 4.
+
 ## Open findings not yet acted on
 
 - The current path returns nothing on 304 of 6,906 calls (machine 1) and 167 of
