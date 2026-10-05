@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from functools import lru_cache
 from typing import Dict, Any, List, Optional
 
 def _get_json_data(path: Path, error_msg: str) -> dict:
@@ -228,8 +229,13 @@ def save_diff_rules(config: Dict[str, Any]) -> bool:
         print(f"儲存差異規則配置失敗: {e}")
         return False
 
+@lru_cache(maxsize=8)
 def load_setting_regions_config(path: Path = None) -> Dict[str, Any]:
-    """載入設定值區域配置"""
+    """載入設定值區域配置
+
+    結果會被快取：這個檔案是唯讀設定，但每筆單一數值 OCR 都會呼叫一次，
+    一支影片會重複開檔數萬次。沒有任何流程會在執行期間寫入它。
+    """
     if path is None:
         path = Path("config") / "setting_regions.json"
     

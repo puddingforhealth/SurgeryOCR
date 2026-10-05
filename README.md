@@ -54,6 +54,52 @@ This is the standard operating procedure for analyzing surgery videos. These com
     python video_annotator_gui.py
 
 
+## Golden-Regression Testing
+
+Most pipeline changes are meant to be behaviour-preserving (performance work,
+refactoring). Those are verified by running a fixed set of videos and diffing the
+outputs against recorded reference outputs — the pipeline is deterministic, so a
+correct change reproduces the baseline byte for byte.
+
+```bash
+# record reference outputs (do this on a known-good commit)
+python tools/golden.py baseline --set full
+
+# after a change: run again and diff against the baseline
+python tools/golden.py check --set fast     # 2 short videos, ~1 min
+python tools/golden.py check --set full     # 3 machine types, ~18 min
+```
+
+| Flag | Meaning |
+|---|---|
+| `baseline` / `check` | record reference outputs, or run and compare against them |
+| `--set fast\|full` | which video set from `tools/golden_videos.json` to run |
+| `--python PATH` | interpreter that has torch + easyocr (default: the current one) |
+| `--rtol FLOAT` | relative tolerance for `avg_rmse` / `confidence` (default `1e-6`) |
+
+Outputs and wall-clock timings land in `runs/` (gitignored):
+`runs/baseline/<video>/`, `runs/candidate/<video>/`, plus a `timing.json` in each.
+`check` prints the wall-clock delta against the baseline, so a change can be judged
+on both correctness and speed in one command.
+
+The test set in `tools/golden_videos.json` covers all three machine types and both
+pattern-matching paths (the RGB pedal icon on machines 1/2, the rule-binarized digit
+on machine 3). Add a video there when a new machine type or code path appears.
+
+### Comparing two runs directly
+
+```bash
+python tools/compare_analysis.py <baseline_dir> <candidate_dir> [--rtol 1e-6] [--quiet]
+```
+
+Structural fields (`pattern`, `pattern_name`, `start_frame`, `end_frame`,
+`frame_count`, `ocr_text`, `setting`, `matched_frames`) are compared exactly;
+`avg_rmse` and `confidence` use the relative tolerance, because cuDNN kernels are
+not guaranteed to be bit-reproducible across machines. Exit code 0 means the runs
+are equivalent. Use `--rtol` with a larger value when a change is expected to
+perturb scores but not the segmentation (for example when adding a change-detection
+gate that reuses a previous frame's score).
+
 ## Development Tools
 
 ### ROI Picker (`roi_picker.py`)

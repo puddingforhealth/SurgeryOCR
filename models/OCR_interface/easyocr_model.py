@@ -47,6 +47,7 @@ class EasyOCRModel(BaseOCRModel):
         
         try:
             self.reader = easyocr.Reader(**reader_params)
+            self._unwrap_data_parallel()
             if self.debug_output:
                 print(f"✓ EasyOCR Reader 初始化成功")
                 print(f"  - GPU加速: {'啟用' if self.gpu else '停用'}")
@@ -63,6 +64,26 @@ class EasyOCRModel(BaseOCRModel):
                 print(f"使用最少參數初始化 EasyOCR Reader 失敗: {fallback_e}")
                 raise e # 重新拋出原始錯誤
         
+    def _unwrap_data_parallel(self):
+        """Unwrap EasyOCR's nn.DataParallel wrappers around the detector/recognizer.
+
+        EasyOCR always wraps both nets in DataParallel. On a single device that adds
+        no parallelism, but every forward call still walks the whole parameter and
+        buffer list to verify device placement — with one OCR call per changed ROI
+        this dominated the per-call overhead. EasyOCR moves its inputs to the device
+        itself, so calling the inner module directly produces identical outputs.
+        """
+        try:
+            import torch.nn as nn
+        except Exception:
+            return
+        for attr in ("detector", "recognizer"):
+            net = getattr(self.reader, attr, None)
+            if isinstance(net, nn.DataParallel) and len(net.device_ids) <= 1:
+                setattr(self.reader, attr, net.module)
+                if self.debug_output:
+                    print(f"  - 已拆除 {attr} 的 DataParallel 包裝（單一裝置）")
+
     def recognize(self, image, allowlist=None):
         """
         使用EasyOCR識別圖像中的文字。

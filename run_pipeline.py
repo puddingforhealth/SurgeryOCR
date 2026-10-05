@@ -4,10 +4,10 @@ import time
 import cv2
 import json
 import traceback
-from typing import List, Tuple, Any, Dict, Optional
+from typing import List, Tuple, Any, Dict, Optional, Iterator
 
 # 引入工具
-from utils.pipeline_utils import AsyncImageSaver
+from utils.pipeline_utils import AsyncImageSaver, PrefetchIterator
 from utils.get_configs import (
     load_roi_config,
     load_stage_config,
@@ -109,6 +109,43 @@ def _flush_buffer(
     return
 
 
+def _iter_video_frames(cap: cv2.VideoCapture) -> Iterator[Tuple[int, np.ndarray, float]]:
+    """Yield (frame_idx, frame_bgr, timestamp_ms) from a VideoCapture.
+
+    The timestamp is read before the decode (CAP_PROP_POS_MSEC reports the position
+    of the frame about to be returned), and the index still advances across an
+    undecodable frame so the timeline stays aligned with the source.
+    """
+    frame_idx = 0
+    while cap.isOpened():
+        ts = cap.get(cv2.CAP_PROP_POS_MSEC)
+        ret, frame_bgr = cap.read()
+        if not ret:
+            break
+        if frame_bgr is None or frame_bgr.size == 0:
+            frame_idx += 1
+            continue
+        yield frame_idx, frame_bgr, ts
+        frame_idx += 1
+
+
+def _iter_cache_frames(cache_files: List[Path]) -> Iterator[Tuple[int, np.ndarray, float]]:
+    """Yield (frame_idx, frame_bgr, 0.0) from cached JPEG frames.
+
+    The index comes from the filename rather than a counter. cv2.imread fails on
+    non-ASCII paths on Windows, so the bytes are read with np.fromfile and decoded
+    in memory. Cached frames carry no timestamp.
+    """
+    for img_path in cache_files:
+        frame_idx = int(img_path.stem.split('_')[1])
+        img_array = np.fromfile(str(img_path), dtype=np.uint8)
+        frame_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        if frame_bgr is None:
+            print(f"⚠️ [Read Mode] Failed to read image: {img_path}")
+            continue
+        yield frame_idx, frame_bgr, 0.0
+
+
 def _collect_stage_matches(
     region_matches: Dict[str, List[Tuple[int, Any, Any]]],
     stage_res: Dict[str, Any],
@@ -197,7 +234,6 @@ def run_pipeline(video_path: Path, base_output_dir: Path, mode: str = "detail", 
     # Frame Source Setup
     cap = None
     cache_files = []
-    cache_iterator = None
     total_frames = 0
     
     if mode == "read":
@@ -221,7 +257,6 @@ def run_pipeline(video_path: Path, base_output_dir: Path, mode: str = "detail", 
             return
             
         total_frames = len(cache_files)
-        cache_iterator = iter(cache_files)
         print(f"📂 [Read Mode] Found {total_frames} cached frames.")
         
     else:
@@ -230,49 +265,20 @@ def run_pipeline(video_path: Path, base_output_dir: Path, mode: str = "detail", 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else None
 
     frame_timestamps: List[float] = [] # 記錄每幀的時間戳 (ms)
-    
+    frame_source: Optional[PrefetchIterator] = None
+
     try:
         # 初始化 tqdm
         pbar = tqdm(total=total_frames, desc=f"Processing frames ({video_name})", mininterval=30.0, maxinterval=60.0)
         
-        frame_idx = 0
-        while True:
-            frame_bgr = None
-            ts = 0.0
-            
-            if mode == "read":
-                try:
-                    img_path = next(cache_iterator)
-                    # 從檔名解析 frame_idx
-                    frame_idx = int(img_path.stem.split('_')[1])
-                    
-                    # [Fix] Windows 下路徑含中文時，cv2.imread 會失敗，需改用 imdecode
-                    # frame_bgr = cv2.imread(str(img_path))
-                    img_array = np.fromfile(str(img_path), dtype=np.uint8)
-                    frame_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                    
-                    if frame_bgr is None:
-                        print(f"⚠️ [Read Mode] Failed to read image: {img_path}")
-                        continue
-                    # Read mode 下時間戳暫時設為 0 或依賴外部記錄 (此處簡化)
-                    ts = 0.0 
-                except StopIteration:
-                    break
-            else:
-                if not cap.isOpened():
-                    break
-                    
-                # 獲取當前時間戳 (在 read 之前獲取 POS_MSEC)
-                ts = cap.get(cv2.CAP_PROP_POS_MSEC)
-                
-                ret, frame_bgr = cap.read()
-                if not ret:
-                    break
-                
-                if frame_bgr is None or frame_bgr.size == 0:
-                    frame_idx += 1 # 即使是壞幀，索引也要遞增，保持時間軸一致
-                    continue
+        # 解碼在背景執行緒進行，與主執行緒的階段分析 + OCR 重疊。
+        # 解碼佔總時間近四成且與分析完全序列，重疊後這段大多可被隱藏。
+        if mode == "read":
+            frame_source = PrefetchIterator(_iter_cache_frames(cache_files))
+        else:
+            frame_source = PrefetchIterator(_iter_video_frames(cap))
 
+        for frame_idx, frame_bgr, ts in frame_source:
             # 記錄時間戳
             frame_timestamps.append(ts)
             
@@ -333,13 +339,14 @@ def run_pipeline(video_path: Path, base_output_dir: Path, mode: str = "detail", 
                     if mode == "detail":
                         _save_roi_images(async_saver, frame_bgr, roi_dict, frame_idx, analysis_dir, force)
 
-            frame_idx += 1 # 確保每一幀索引遞增
-
     except KeyboardInterrupt:
         print("\n⚠️ 使用者中斷")
     except Exception as e:
         print(f"\n❌ 發生未預期的錯誤: {e}")
         traceback.print_exc()
+    finally:
+        if frame_source is not None:
+            frame_source.close()
         
     # [Step C-2] 影片結束仍未確認機型：以 fallback 機型回溯處理 Buffer，
     # 避免整段 OCR 結果被靜默丟棄（不寫入 mapping，因為機型並未實際確認）

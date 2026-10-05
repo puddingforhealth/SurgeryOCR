@@ -1,0 +1,13 @@
+{
+  "_comment": "Test set for golden-regression runs. 'fast' is the quick loop run on every change; 'full' is the per-machine acceptance set run at the end of each phase. Chosen to cover all three machine types and both pattern-matching paths (RGB pedal icon on machine 1/2, rule-binarized digit on machine 3).",
+  "fast": [
+    "data/0816/2025-08-16_135759.MP4",
+    "data/0816/2025-08-16_133917.MP4"
+  ],
+  "full": [
+    "data/0816/2025-08-16_135759.MP4",
+    "data/0816/2025-08-16_133917.MP4",
+    "data/1131009何素珠od.MP4",
+    "data/0450713odlisa.mp4"
+  ]
+}

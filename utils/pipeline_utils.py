@@ -60,3 +60,73 @@ class AsyncImageSaver:
         self.worker_thread.join()
         # print(f"[AsyncSaver] Finished. Total saved: {self.total_saved}")
 
+
+class PrefetchIterator:
+    """Run an iterator on a background thread and hand items over a bounded queue.
+
+    Video decoding is CPU-bound inside FFmpeg and releases the GIL, so decoding the
+    next frames while the main thread runs pattern matching and OCR on the GPU
+    overlaps two otherwise serial stages. Order is preserved exactly: a single
+    producer thread puts items in the order the source yields them.
+
+    The queue is bounded so a fast producer cannot grow unboundedly; at 1080p a
+    BGR frame is ~6 MB, so the default depth caps the buffer at roughly 50 MB.
+    """
+
+    def __init__(self, iterable, maxsize: int = 8):
+        self._queue = queue.Queue(maxsize=maxsize)
+        self._stop = threading.Event()
+        self._error = None
+        self._sentinel = object()
+        self._iterable = iterable
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def _worker(self):
+        try:
+            for item in self._iterable:
+                # Block only briefly so a close() during a full queue is noticed.
+                while not self._stop.is_set():
+                    try:
+                        self._queue.put(item, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+                if self._stop.is_set():
+                    break
+        except BaseException as exc:  # re-raised on the consumer thread
+            self._error = exc
+        finally:
+            try:
+                self._queue.put(self._sentinel, timeout=1.0)
+            except queue.Full:
+                pass
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while True:
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                if not self._thread.is_alive():
+                    if self._error is not None:
+                        raise self._error
+                    raise StopIteration
+                continue
+            if item is self._sentinel:
+                if self._error is not None:
+                    raise self._error
+                raise StopIteration
+            return item
+
+    def close(self):
+        """Stop the producer and drain the queue so the thread can exit."""
+        self._stop.set()
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+        self._thread.join(timeout=2.0)
