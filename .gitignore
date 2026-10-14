@@ -67,3 +67,6 @@ release_env/
 
 # golden-regression baselines and benchmark outputs (tools/compare_analysis.py)
 runs/
+
+# Google Cloud SDK downloaded by scripts/setup.sh
+tools/google-cloud-sdk/

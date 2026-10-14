@@ -1,0 +1,7 @@
+{
+  "_comment": "GCS location used by tools/cloud_videos.py. Object keys under videos_prefix mirror paths relative to data_dir; results go under results_prefix/<video key without extension>/. Bucket lives in GCP project xensur-cataract (asia-east1).",
+  "bucket": "gs://xensur-surgeryocr-videos",
+  "videos_prefix": "videos",
+  "results_prefix": "results",
+  "data_dir": "data"
+}

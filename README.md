@@ -54,6 +54,40 @@ This is the standard operating procedure for analyzing surgery videos. These com
     python video_annotator_gui.py
 
 
+## Running on a Cloud Machine
+
+Videos are too large for git, so they travel through a GCS bucket
+(`gs://xensur-surgeryocr-videos`, set in `config/cloud.json`). One setup script
+installs everything, including the Google Cloud SDK if it is missing:
+
+```bash
+git clone <repo> && cd SurgeryOCR
+bash scripts/setup.sh                      # Linux (cloud); scripts/setup.ps1 on Windows
+gcloud auth login --no-browser             # once per machine; paste the printed command locally
+python tools/cloud_videos.py doctor        # packages, GPU, templates, bucket access
+python tools/cloud_videos.py pull --all --run --upload-results
+```
+
+The last line downloads every video into `data/`, runs `run_pipeline.py --mode ram`
+on each, and uploads `data/<video>/*.json*` back to the bucket. Back on the
+workstation, `python tools/cloud_videos.py pull-results --all` fetches them.
+
+### `tools/cloud_videos.py`
+
+| Command | What it does |
+|---|---|
+| `doctor` | Check Python packages, CUDA, tracked weights/templates, `gcloud` login and bucket access |
+| `list` | Show the videos and result directories in the bucket with sizes |
+| `push <paths...> [--force]` | Upload video files or directories. Keys mirror the path under `data/`; same-size objects are skipped |
+| `pull [names...] [--all] [--force] [--run] [--mode M] [--upload-results]` | Download by name, stem, key or glob. `--run` analyses each video after download; `--upload-results` pushes its outputs |
+| `push-results [names...] [--all] [--force]` | Upload `data/<video>/*.json*` for the given videos (`--all`: every video that has a result directory) |
+| `pull-results [names...] [--all]` | Download result directories into `data/` |
+
+Global option `--bucket gs://...` (or `SURGERYOCR_GCS_BUCKET`) overrides the
+configured bucket. Transfers use `gcloud storage`, so multi-GB uploads resume on
+retry. Bucket layout and authentication details are in
+[`docs/toolchain.md`](docs/toolchain.md).
+
 ## Golden-Regression Testing
 
 > Measured timings, and the optimisations that were tried and rejected, are recorded
