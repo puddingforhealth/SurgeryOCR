@@ -136,43 +136,66 @@ declaration — not a code-only change, and an accuracy decision rather than a
 performance one. `tools/ab_ocr_detector.py` re-runs the comparison after any such
 change.
 
-## Data-quality finding: machine 3 ASP / VAC regions span three values
+## Data-quality finding: machine 3 ASP / VAC mix four display modes in one stream
 
 Not a performance issue, but found while measuring one, and it affects output that
 already exists.
 
-The UNITY "Asp Flow" and "Vacuum" panels are ramp widgets showing three numbers —
-start, current and end — above a triangle whose apex marks the current position.
-The configured ROIs cover all three:
+The UNITY "Asp Flow" and "Vacuum" panels are not single-value readouts. The same
+box shows four different things depending on what the machine is doing:
 
-| region | box | size | values inside |
-|---|---|---:|---|
-| `ASP` | `[1748, 482, 1915, 516]` | 167x34 | `30` `37` `30` |
-| `VAC` | `[1748, 568, 1915, 610]` | 167x42 | `350` `725` `600` |
+| what is drawn | meaning | example |
+|---|---|---|
+| flat bar, one right-aligned number | fixed setting | `28` |
+| sloped line, two numbers (left, right) | linear ramp setting (start -> end) | `50` ... `200` |
+| triangle, three numbers (left, apex, right) | triangular ramp setting (start -> peak -> end) | `30` `37` `30` |
+| one large centred number | **live value** | `246` |
 
-On `0450713odlisa` this shows up directly in the output: 60 of 349 `ASP` readings
-(17.2%) and 61 of 339 `VAC` readings (18.0%) are several numbers concatenated —
-`'30 37 30'` 23 times, `'350 725 600'` 21 times. EasyOCR detects each number as its
-own text box and the wrapper joins the results left to right, so the recorded
-`ocr_text` is faithful to the ROI; the ROI is what is wrong.
+The configured ROIs cover the whole widget, so every mode lands in the same
+`ocr_text` stream with nothing to tell them apart:
 
-The remaining single-number readings are the more serious problem, because nothing
-records *which* of the three numbers was read. A sample of consecutive `ASP`
-readings:
+| region | box | size |
+|---|---|---:|
+| `ASP` | `[1748, 482, 1915, 516]` | 167x34 |
+| `VAC` | `[1748, 568, 1915, 610]` | 167x42 |
 
-```
-11293 '3'    11423 '5'    11591 '37 30'   11615 '30 37 30'   11724 '5'
-11829 '12'   11915 '9'    11931 '10'      11954 '30 37 30'   11990 '33'
-```
+Classifying each recorded frame of `0450713odlisa` by ink in the left and right
+quarter of the ROI (left+right = a ramp, right only = a bar, neither = a centred
+live value) gives:
 
-So the `ASP` and `VAC` series on machine 3 cannot currently be read as a time series
-of one quantity. Fixing it means deciding which of the three numbers is wanted and
-re-annotating a box around just that one — which is the same change that would allow
-skipping the text detector, so it buys data quality and a 2.75x OCR speed-up at
-once. Whether the centre value's box can be fixed at all depends on whether the ramp
-apex moves horizontally; that needs checking against the machine.
+| | ASP (354 records) | VAC (340 records) |
+|---|---:|---:|
+| live value, single-number text | 284 (80.2%) | 265 (77.9%) |
+| ramp display, multi-number text | 59 (16.7%) | 61 (17.9%) |
+| ramp display, **single**-number text | 2 (0.6%) | 10 (2.9%) |
+| bar display, single-number text | 8 (2.3%) | 4 (1.2%) |
+| live value, multi-number text | 0 | 0 |
 
-Machine 1/2 regions have the same shape of problem far more rarely: `region2` and
+No live-mode frame ever produced a multi-number read, which is the consistency check
+on the classifier.
+
+The multi-number rows are visibly wrong and easy to filter. The dangerous rows are
+the last two: a setting read as a single number is **indistinguishable from a live
+value**. `VAC` frame 31340 is a `50 -> 200` ramp recorded as `'200'`; frame 21178 is
+`150 -> 725` recorded as `'725'`. Those are plausible vacuum readings, so no range
+check will catch them. `ASP` frame 24458 records the bar setting `'28'` and the group
+spans 110 frames, which reads as "held at 28 for 110 frames".
+
+In total 10 `ASP` records (275 frames) and 14 `VAC` records (135 frames) are settings
+wearing a live value's clothes.
+
+The existing `setting` field does not help. `_determine_if_setting_value` only runs
+for the regions listed in `config/setting_regions.json`
+(`region1`-`region5`, with a sub-box in machine-1/2 ROI coordinates); `ASP` and `VAC`
+are not listed, so the flag is hardcoded `True` for every `multi_digit_group` and
+`False` for every `single_digit` — the opposite of the truth for the bar-mode frames.
+
+Fixing it means deciding which quantity the series is supposed to hold, then either
+splitting the widget into one box per value or recording the display mode alongside
+the text. Narrowing to one box is also what would allow skipping the CRAFT text
+detector, so it buys data quality and a 2.75x OCR speed-up at once.
+
+Machine 1/2 regions have a milder version of the same problem: `region2` and
 `region3` show a space in 0.2-0.3% of readings, `region5` in 2 of 4.
 
 ## Open findings not yet acted on
