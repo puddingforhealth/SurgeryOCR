@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zettabyte-transfer"
+version = "0.1.0"
+description = "Reusable AzCopy-based Zettabyte data and model transfer CLI"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+zb = "zettabyte_transfer.cli:main"
+
+[tool.setuptools]
+packages = ["zettabyte_transfer"]

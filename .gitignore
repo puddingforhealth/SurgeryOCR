@@ -59,3 +59,12 @@ release_env/
 
 #debugging/ profiling files
 *.pstats
+
+# Zettabyte credentials / local transfer artifacts
+.env
+.env.*
+!.env.example
+.zettabyte/
+zettabyte.local.json
+*.egg-info/
+!tests/check_zettabyte.py

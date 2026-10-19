@@ -27,6 +27,7 @@ This project aims to automate the extraction and labeling of critical numerical 
 2.  **Install dependencies:**
     ```bash
     pip install -r requirements.txt
+    ```
 
 ## Usage
 
@@ -52,3 +53,15 @@ This is the standard operating procedure for analyzing surgery videos. These com
 5.  **Review Results**: Launch the graphical user interface to load a video and visually inspect the analysis results, including OCR data and surgical stage segments.
     ```bash
     python video_annotator_gui.py
+    ```
+
+## Zettabyte cloud transfers
+
+Use the reusable `zb` CLI to upload videos, datasets and models, publish cloud outputs, and download results. See the [Zettabyte guide](docs/zettabyte.md) for setup and the SurgeryOCR cloud analysis workflow.
+
+```bash
+python3 -m pip install --no-deps -e .
+zb configure
+zb doctor
+zb --help
+```

@@ -1,4 +1,5 @@
 import argparse
+import sys
 from pathlib import Path
 import time
 import cv2
@@ -116,8 +117,7 @@ def run_pipeline(video_path: Path, base_output_dir: Path, mode: str = "detail", 
     cache_root = Path("data/roi_img_caches")
     
     if not stage_config_path.exists():
-        print("❌ 錯誤: 找不到 config/surgery_stage_rois.json")
-        return
+        raise FileNotFoundError("config/surgery_stage_rois.json")
 
     # Analyzers
     stage_analyzer = StageAnalyzer(stage_config_path, cache_root)
@@ -320,11 +320,18 @@ def run_pipeline(video_path: Path, base_output_dir: Path, mode: str = "detail", 
 
             frame_idx += 1 # 確保每一幀索引遞增
 
-    except KeyboardInterrupt:
-        print("\n⚠️ 使用者中斷")
-    except Exception as e:
-        print(f"\n❌ 發生未預期的錯誤: {e}")
-        traceback.print_exc()
+    except BaseException:
+        if async_saver:
+            async_saver.stop()
+        raise
+    finally:
+        if cap is not None:
+            cap.release()
+
+    if processed_frames == 0 or ocr_processor is None:
+        if async_saver:
+            async_saver.stop()
+        raise RuntimeError("No frames processed or OCR machine configuration not detected")
         
     # [Step D] 結束處理：儲存結果
     if ocr_processor:
@@ -425,7 +432,7 @@ def main() -> None:
     target_path = args.video
     if not target_path.exists():
         print(f"❌ 路徑不存在: {target_path}")
-        sys.exit(0)
+        sys.exit(1)
 
     if target_path.is_file():
         video_files = [target_path]
@@ -433,7 +440,7 @@ def main() -> None:
         video_files = sorted({*target_path.glob("*.mp4"), *target_path.glob("*.MP4")})
         if not video_files:
             print(f"⚠️ 在目錄 {target_path} 中未找到 .mp4 檔案")
-            return
+            sys.exit(1)
         print(f"📂 找到 {len(video_files)} 個影片檔案，準備開始批次分析...")
 
     execution_failed = False
