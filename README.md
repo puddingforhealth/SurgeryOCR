@@ -47,6 +47,29 @@ This project aims to automate the extraction and labeling of critical numerical 
 
 ## Usage
 
+### Single-pass pipeline (`run_pipeline.py`)
+
+One command decodes each video once and writes OCR and stage results:
+
+```bash
+python run_pipeline.py --video data                     # every .mp4 under data/, subfolders included
+python run_pipeline.py --video data/0816/clip.MP4       # one video
+python run_pipeline.py --video data --output-dir runs/cloud
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--video PATH` | required | a video file, or a directory searched recursively for `.mp4` (any letter case) |
+| `--output-dir DIR` | `data` | results go to `DIR/<video stem>/` (`stage_analysis.json`, `*_ocr_testing.jsonl`) |
+| `--mode` | `ram` | `ram` keeps frames in memory (fastest); `frame` saves full frames; `detail` saves frames and ROI crops; `read` reuses a saved frame cache |
+| `--force` | off | overwrite an existing frame cache and ROI images |
+
+Because results are keyed by file stem, a directory run refuses to start when two
+videos in different subfolders share a name; rename one or run them separately.
+A failure on one video is reported and the batch continues; the exit code is 1 if any failed.
+
+### Step-by-step tools
+
 This is the standard operating procedure for analyzing surgery videos. These commands assume you are running them from the root of the project directory.
 
 1.  **Place Videos**: Put all surgery videos (e.g., `.mp4` files) into the `data/` directory.

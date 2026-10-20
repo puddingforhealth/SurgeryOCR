@@ -3,7 +3,24 @@ import queue
 import cv2
 import time
 from pathlib import Path
+from typing import Dict, List
 import numpy as np
+
+
+def find_videos(target: Path) -> List[Path]:
+    """The file itself, or every .mp4 (any case) under a directory, subfolders included."""
+    if target.is_file():
+        return [target]
+    return sorted(p for p in target.rglob("*") if p.is_file() and p.suffix.lower() == ".mp4")
+
+
+def duplicate_stems(videos: List[Path]) -> Dict[str, List[Path]]:
+    """Videos sharing a file stem; their results would land in the same <output-dir>/<stem>/."""
+    by_stem: Dict[str, List[Path]] = {}
+    for video in videos:
+        by_stem.setdefault(video.stem, []).append(video)
+    return {stem: paths for stem, paths in by_stem.items() if len(paths) > 1}
+
 
 class AsyncImageSaver:
     def __init__(self, max_queue_size=200):

@@ -7,7 +7,7 @@ import traceback
 from typing import List, Tuple, Any, Dict, Optional, Iterator
 
 # 引入工具
-from utils.pipeline_utils import AsyncImageSaver, PrefetchIterator
+from utils.pipeline_utils import AsyncImageSaver, PrefetchIterator, duplicate_stems, find_videos
 from utils.get_configs import (
     load_roi_config,
     load_stage_config,
@@ -513,7 +513,7 @@ def _write_stage_analysis(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Single-pass surgery pipeline")
-    parser.add_argument("--video", type=Path, required=True, help="影片檔或包含影片的資料夾")
+    parser.add_argument("--video", type=Path, required=True, help="影片檔或包含影片的資料夾（含子資料夾）")
     parser.add_argument("--output-dir", type=Path, default=Path("data"), help="輸出根目錄")
     parser.add_argument("--force", action="store_true", help="覆蓋既有 frame cache 與 ROI 圖片")
     parser.add_argument("--mode", type=str, default="ram", choices=["detail", "frame", "ram", "read"],
@@ -525,13 +525,17 @@ def main() -> None:
         print(f"❌ 路徑不存在: {target_path}")
         sys.exit(0)
 
-    if target_path.is_file():
-        video_files = [target_path]
-    else:
-        video_files = sorted({*target_path.glob("*.mp4"), *target_path.glob("*.MP4")})
+    video_files = find_videos(target_path)
+    if not target_path.is_file():
         if not video_files:
-            print(f"⚠️ 在目錄 {target_path} 中未找到 .mp4 檔案")
+            print(f"⚠️ 在目錄 {target_path}（含子資料夾）中未找到 .mp4 檔案")
             return
+        duplicates = duplicate_stems(video_files)
+        if duplicates:
+            print("❌ 下列影片檔名相同，結果會寫進同一個輸出目錄而互相覆蓋；請改名或分批指定：")
+            for stem, paths in duplicates.items():
+                print(f"   {stem}: " + ", ".join(str(p) for p in paths))
+            sys.exit(1)
         print(f"📂 找到 {len(video_files)} 個影片檔案，準備開始批次分析...")
 
     execution_failed = False
