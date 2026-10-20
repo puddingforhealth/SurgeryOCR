@@ -33,13 +33,16 @@ This project aims to automate the extraction and labeling of critical numerical 
 
     `scripts/setup.sh` also installs the system libraries OpenCV needs, the Google Cloud
     SDK, and stops with an error if `nvidia-smi` sees a GPU that torch cannot use.
-    Environment overrides:
+    On a GPU machine it reads the CUDA version the driver supports from `nvidia-smi` and
+    installs torch from the newest pytorch.org CUDA index not above it (PyPI's default
+    build targets the newest CUDA, which older drivers reject); a torch already built for
+    a newer CUDA than the driver is replaced. Environment overrides:
 
     | Variable | Effect |
     |---|---|
     | `PYTHON=python3.11` | interpreter the venv is created from (default `python3`) |
     | `VENV_DIR=/big/disk/venv` | keep the venv on another disk; `.venv` becomes a symlink to it, so `source .venv/bin/activate` still works |
-    | `TORCH_INDEX_URL=<url>` | pip index for torch, e.g. a specific CUDA build from pytorch.org (default PyPI, whose Linux wheels bundle CUDA) |
+    | `TORCH_INDEX_URL=<url>` | pip index for torch, overriding the automatic choice (e.g. `https://download.pytorch.org/whl/cu126`) |
     | `SKIP_GCLOUD=1` | skip the Google Cloud SDK when videos arrive another way (e.g. `rcs`) |
 
 ## Usage

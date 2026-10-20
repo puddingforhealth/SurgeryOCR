@@ -52,7 +52,41 @@ echo "== python packages"
 # No pip cache: container root disks are small, and re-runs skip satisfied requirements anyway.
 PIP=("$VPY" -m pip install -q --no-cache-dir)
 "${PIP[@]}" --upgrade pip
-"${PIP[@]}" ${TORCH_INDEX_URL:+--index-url "$TORCH_INDEX_URL"} torch torchvision
+
+# PyPI's Linux torch targets the newest CUDA, which an older driver rejects ("driver too
+# old"). pytorch.org hosts one index per CUDA version, so pick the newest one the driver
+# runs, and replace an installed torch that was built for a newer CUDA than that.
+version_le() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
+DRIVER_CUDA=""
+if command -v nvidia-smi >/dev/null 2>&1; then
+  DRIVER_CUDA=$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA[A-Z ]*Version: *\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
+fi
+TORCH_CUDA=$("$VPY" -c "import torch; print(torch.version.cuda or 'cpu')" 2>/dev/null || true)
+if [ -n "$DRIVER_CUDA" ]; then
+  echo "   driver supports CUDA $DRIVER_CUDA; installed torch: ${TORCH_CUDA:-none}"
+  if [ -n "$TORCH_CUDA" ] && { [ "$TORCH_CUDA" = "cpu" ] || ! version_le "$TORCH_CUDA" "$DRIVER_CUDA"; }; then
+    "$VPY" -m pip uninstall -y -q torch torchvision
+    TORCH_CUDA=""
+  fi
+fi
+if [ -z "$TORCH_CUDA" ]; then
+  if [ -n "${TORCH_INDEX_URL:-}" ]; then
+    "${PIP[@]}" --index-url "$TORCH_INDEX_URL" torch torchvision
+  elif [ -n "$DRIVER_CUDA" ]; then
+    TORCH_TAG=""
+    for tag in cu130 cu129 cu128 cu126 cu124 cu121 cu118; do
+      ver="${tag:2:-1}.${tag: -1}"
+      version_le "$ver" "$DRIVER_CUDA" || continue
+      if "${PIP[@]}" --index-url "https://download.pytorch.org/whl/$tag" torch torchvision; then
+        TORCH_TAG=$tag; break
+      fi
+    done
+    [ -n "$TORCH_TAG" ] || { echo "error: no torch build found for CUDA $DRIVER_CUDA; set TORCH_INDEX_URL" >&2; exit 1; }
+    echo "   torch from the $TORCH_TAG index"
+  else
+    "${PIP[@]}" torch torchvision
+  fi
+fi
 "${PIP[@]}" -r requirements.txt
 
 if [ "${SKIP_GCLOUD:-}" != "1" ]; then

@@ -7,7 +7,7 @@ Everything the pipeline needs, where it lives, and which step uses it.
 |---|---|---|---|---|
 | Python 3.10+ | runtime | Linux: `.venv/` (gitignored; a symlink when `VENV_DIR` is set). Windows: current Python | Linux: `scripts/setup.sh` creates the venv from `python3` (or `$PYTHON`); Windows: you | everything |
 | `opencv-python`, `numpy`, `Pillow` | frame decode, binarize, template matching | pip | `scripts/setup.*` via `requirements.txt` | `run_pipeline.py`, `stage_pattern_analysis.py` |
-| `torch`, `torchvision`, `easyocr` | OCR (CRAFT detector + recognizer). EasyOCR downloads its `en` weights to `~/.EasyOCR` on first run, so the machine needs outbound internet once | pip | `scripts/setup.*`; on Linux torch comes from `$TORCH_INDEX_URL` when set | `surgery_analysis_process.py` |
+| `torch`, `torchvision`, `easyocr` | OCR (CRAFT detector + recognizer). EasyOCR downloads its `en` weights to `~/.EasyOCR` on first run, so the machine needs outbound internet once | pip | `scripts/setup.*`; on Linux torch comes from the pytorch.org index matching the driver's CUDA version (or `$TORCH_INDEX_URL`) | `surgery_analysis_process.py` |
 | `h5py`, `tqdm`, `scikit-learn`, `matplotlib` | frame cache, progress, tooling, GUI | pip | `scripts/setup.*` | `extract_roi_images.py`, `video_annotator_gui.py` |
 | CRNN weights | fallback simple OCR model | `models/OCR_interface/simpleocr/*.pth` (tracked in git) | `git clone` | `models/OCR_interface` |
 | Pattern / header templates | stage and header matching | `data/roi_img_caches/` (tracked in git) | `git clone` | `stage_pattern_analysis.py` |
