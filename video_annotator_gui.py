@@ -43,7 +43,7 @@ from utils.get_configs import (
     load_diff_rules, load_roi_config, load_roi_header_config, load_pattern_name_mapping,
     get_roi_config_path, save_roi_config
 )
-from utils.get_paths import resolve_video_analysis_dir
+from utils.get_paths import get_analysis_root, resolve_video_analysis_dir, set_analysis_root
 
 # --- 兼容 PyInstaller 的路徑處理 ---
 def resource_path(relative_path):
@@ -384,7 +384,14 @@ class VideoAnnotator(tk.Frame):
         
         self.lbl_video_path = tk.Label(video_control_frame, text="未選擇影片")
         self.lbl_video_path.pack(side="left", padx=5)
-        
+
+        self.btn_analysis_root = tk.Button(video_control_frame, text="分析資料夾…", command=self._choose_analysis_root)
+        self.btn_analysis_root.pack(side="left", padx=(10, 5))
+
+        self.lbl_analysis_dir = tk.Label(video_control_frame, text="", fg="gray30")
+        self.lbl_analysis_dir.pack(side="left", padx=5)
+        self._update_analysis_dir_label()
+
         
         self.btn_save = tk.Button(video_control_frame, text="儲存標註", command=lambda: self._save_annotations(self.region_name))
         self.btn_save.pack(side="right", padx=(0, 10))
@@ -740,7 +747,36 @@ class VideoAnnotator(tk.Frame):
         )
         if not filepath:
             return
+        self._open_video(filepath)
 
+    def _choose_analysis_root(self):
+        """選擇分析資料根目錄（例如從雲端拉回的 runs/cloud），並以它重新載入目前影片"""
+        current, _ = get_analysis_root()
+        folder = filedialog.askdirectory(
+            title="選擇分析資料根目錄（其下為 <影片檔名>/ 資料夾；取消則不變）",
+            initialdir=str(current.resolve()) if current.exists() else str(Path.cwd()),
+        )
+        if not folder:
+            return
+        set_analysis_root(Path(folder))
+        self._update_analysis_dir_label()
+        if getattr(self, "video_path", None):
+            self._stop_playback()
+            self._open_video(str(self.video_path))
+
+    def _update_analysis_dir_label(self):
+        """顯示目前影片實際使用的分析資料夾，未載入影片時顯示根目錄"""
+        if not hasattr(self, "lbl_analysis_dir"):
+            return
+        root_dir, overridden = get_analysis_root()
+        if getattr(self, "video_path", None):
+            text = f"分析資料: {resolve_video_analysis_dir(self.video_path)}"
+        else:
+            text = f"分析資料根目錄: {root_dir}" + ("" if overridden else "（預設）")
+        self.lbl_analysis_dir.config(text=text)
+
+    def _open_video(self, filepath):
+        """開啟影片並載入其分析資料"""
         self._clear_previous_video_data()
 
         try:
@@ -769,6 +805,7 @@ class VideoAnnotator(tk.Frame):
 
             if hasattr(self.lbl_video_path, 'config'):
                  self.lbl_video_path.config(text=str(self.video_path.name))
+            self._update_analysis_dir_label()
 
             self._load_roi_config()
             self._load_surgery_stage_roi_config()  # 加載手術階段ROI配置

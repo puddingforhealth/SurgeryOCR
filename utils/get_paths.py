@@ -5,6 +5,21 @@ _ENV_ANALYSIS_ROOT = os.environ.get("ANALYSIS_DATA_ROOT")
 DEFAULT_ANALYSIS_ROOT = Path(_ENV_ANALYSIS_ROOT or "data")
 
 
+def set_analysis_root(root: Path | str | None) -> None:
+    """
+    在執行中切換分析資料根目錄，效果等同設定 ANALYSIS_DATA_ROOT：之後的查找優先使用
+    <root>/<video stem>/（例如雲端結果 runs/cloud/）。傳入 None 回到預設的 data/ 搜尋。
+    """
+    global _ENV_ANALYSIS_ROOT, DEFAULT_ANALYSIS_ROOT
+    _ENV_ANALYSIS_ROOT = None if root is None else str(root)
+    DEFAULT_ANALYSIS_ROOT = Path(_ENV_ANALYSIS_ROOT or "data")
+
+
+def get_analysis_root() -> tuple[Path, bool]:
+    """目前的分析資料根目錄，以及它是否為覆寫值（而非預設的 data/）。"""
+    return DEFAULT_ANALYSIS_ROOT, _ENV_ANALYSIS_ROOT is not None
+
+
 def resolve_video_analysis_dir(video_path_or_name: Path | str, data_root: Path | None = None) -> Path:
     """
     解析視頻分析目錄，支持多層子目錄結構

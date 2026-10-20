@@ -92,9 +92,31 @@ This is the standard operating procedure for analyzing surgery videos. These com
 5.  **Review Results**: Launch the graphical user interface to load a video and visually inspect the analysis results, including OCR data and surgical stage segments.
     ```bash
     python video_annotator_gui.py
-
+    ```
+    For each video the GUI loads results from `<video folder>/<stem>/`, else the first
+    `data/**/<stem>/` holding analysis files, else `data/<stem>/`. To review results kept
+    elsewhere, e.g. pulled from the cloud into `runs/cloud/`, click **分析資料夾…** and pick
+    that root: `<root>/<stem>/` is then preferred and the open video reloads from it. The label
+    beside the button shows the folder in use. Setting `ANALYSIS_DATA_ROOT=runs/cloud` before
+    launching does the same. Annotations you save go to the folder in use.
 
 ## Running on a Cloud Machine
+
+### Fetching results through `rcs`
+
+`rcs pull` copies one file, so pack the result folder first (pax keeps UTF-8 file names)
+and unpack it with Python, which reads those names correctly on Windows:
+
+```powershell
+rcs 'cd /root/SurgeryOCR && tar --format=pax -czf /tmp/cloud-results.tgz -C runs cloud'
+rcs pull /tmp/cloud-results.tgz build/cloud-results.tgz
+python -X utf8 -m tarfile --filter data -e build/cloud-results.tgz runs
+```
+
+Results land in `runs/cloud/<stem>/`; open the GUI, click **分析資料夾…** and choose `runs/cloud`.
+Re-running the three commands refreshes them.
+
+### Through a GCS bucket
 
 Videos are too large for git, so they travel through a GCS bucket
 (`gs://xensur-surgeryocr-videos`, set in `config/cloud.json`). One setup script
