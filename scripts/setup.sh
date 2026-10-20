@@ -73,14 +73,18 @@ if [ -z "$TORCH_CUDA" ]; then
   if [ -n "${TORCH_INDEX_URL:-}" ]; then
     "${PIP[@]}" --index-url "$TORCH_INDEX_URL" torch torchvision
   elif [ -n "$DRIVER_CUDA" ]; then
+    # Only torch itself comes from pytorch.org: that index sends its nvidia-* CUDA
+    # dependencies to pypi.nvidia.com, which some cloud firewalls block. The same
+    # nvidia-* versions are on PyPI, so the second install resolves them there.
     TORCH_TAG=""
     for tag in cu130 cu129 cu128 cu126 cu124 cu121 cu118; do
       ver="${tag:2:-1}.${tag: -1}"
       version_le "$ver" "$DRIVER_CUDA" || continue
-      if "${PIP[@]}" --index-url "https://download.pytorch.org/whl/$tag" torch torchvision; then
+      if "${PIP[@]}" --no-deps --index-url "https://download.pytorch.org/whl/$tag" torch torchvision; then
         TORCH_TAG=$tag; break
       fi
     done
+    [ -z "$TORCH_TAG" ] || "${PIP[@]}" torch torchvision
     [ -n "$TORCH_TAG" ] || { echo "error: no torch build found for CUDA $DRIVER_CUDA; set TORCH_INDEX_URL" >&2; exit 1; }
     echo "   torch from the $TORCH_TAG index"
   else
