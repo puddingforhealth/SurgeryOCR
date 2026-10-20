@@ -24,9 +24,23 @@ This project aims to automate the extraction and labeling of critical numerical 
     cd SurgeryOCR
     ```
 
-2.  **Install dependencies:**
+2.  **Install dependencies** (idempotent; re-run after every `git pull`):
     ```bash
-    pip install -r requirements.txt
+    bash scripts/setup.sh          # Linux: builds .venv with torch, EasyOCR and requirements.txt
+    source .venv/bin/activate      # in every new shell
+    ```
+    On Windows run `scripts/setup.ps1`, which installs into the current Python.
+
+    `scripts/setup.sh` also installs the system libraries OpenCV needs, the Google Cloud
+    SDK, and stops with an error if `nvidia-smi` sees a GPU that torch cannot use.
+    Environment overrides:
+
+    | Variable | Effect |
+    |---|---|
+    | `PYTHON=python3.11` | interpreter the venv is created from (default `python3`) |
+    | `VENV_DIR=/big/disk/venv` | keep the venv on another disk; `.venv` becomes a symlink to it, so `source .venv/bin/activate` still works |
+    | `TORCH_INDEX_URL=<url>` | pip index for torch, e.g. a specific CUDA build from pytorch.org (default PyPI, whose Linux wheels bundle CUDA) |
+    | `SKIP_GCLOUD=1` | skip the Google Cloud SDK when videos arrive another way (e.g. `rcs`) |
 
 ## Usage
 
@@ -63,6 +77,7 @@ installs everything, including the Google Cloud SDK if it is missing:
 ```bash
 git clone <repo> && cd SurgeryOCR
 bash scripts/setup.sh                      # Linux (cloud); scripts/setup.ps1 on Windows
+source .venv/bin/activate                  # every new shell
 gcloud auth login --no-browser             # once per machine; paste the printed command locally
 python tools/cloud_videos.py doctor        # packages, GPU, templates, bucket access
 python tools/cloud_videos.py pull --all --run --upload-results
