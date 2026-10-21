@@ -33,6 +33,9 @@ This project aims to automate the extraction and labeling of critical numerical 
 
     `scripts/setup.sh` also installs the system libraries OpenCV needs, the Google Cloud
     SDK, and stops with an error if `nvidia-smi` sees a GPU that torch cannot use.
+    OpenCV is pinned to 4.11.0.86 (both `opencv-python` and EasyOCR's `opencv-python-headless`)
+    because OpenCV 5.0 decodes the videos to different pixels and changes some OCR readings;
+    setup verifies the `cv2` that actually imports and repairs a mismatch.
     On a GPU machine it reads the CUDA version the driver supports from `nvidia-smi` and
     installs torch from the newest pytorch.org CUDA index not above it (PyPI's default
     build targets the newest CUDA, which older drivers reject); a torch already built for

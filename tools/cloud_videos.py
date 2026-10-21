@@ -295,6 +295,17 @@ def cmd_pull_results(cfg: Dict[str, str], args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def requirement_pin(package: str, requirements: Path = REPO / "requirements.txt") -> Optional[str]:
+    """The `package==X` version pinned in a requirements file (UTF-8 or UTF-16), or None."""
+    raw = requirements.read_bytes()
+    enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+    for line in raw.decode(enc).splitlines():
+        name, sep, version = line.split("#")[0].strip().partition("==")
+        if sep and name.strip().lower() == package.lower():
+            return version.strip()
+    return None
+
+
 def cmd_doctor(cfg: Dict[str, str], args: argparse.Namespace) -> int:
     problems = 0
 
@@ -310,6 +321,15 @@ def cmd_doctor(cfg: Dict[str, str], args: argparse.Namespace) -> int:
             check(mod, True, getattr(m, "__version__", ""))
         except Exception as e:  # noqa: BLE001
             check(mod, False, str(e).splitlines()[0])
+    pin = requirement_pin("opencv-python")
+    if pin:
+        try:
+            import cv2  # noqa: WPS433
+            want = ".".join(pin.split(".")[:3])
+            check(f"cv2 == {want} (pinned)", cv2.__version__ == want,
+                  "" if cv2.__version__ == want else f"found {cv2.__version__}; re-run scripts/setup.sh")
+        except Exception:  # noqa: BLE001
+            pass
     try:
         import torch  # noqa: WPS433
         check("CUDA available", torch.cuda.is_available(),

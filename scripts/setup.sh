@@ -93,6 +93,28 @@ if [ -z "$TORCH_CUDA" ]; then
 fi
 "${PIP[@]}" -r requirements.txt
 
+# opencv-python and opencv-python-headless both own the cv2/ package. When pip swaps their
+# versions, uninstalling one can delete files the other just wrote, so check what imports.
+CV_PIN=$("$VPY" - <<'PYEOF'
+import codecs, re
+raw = open("requirements.txt", "rb").read()
+text = raw.decode("utf-16" if raw[:2] in (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE) else "utf-8-sig")
+m = re.search(r"^opencv-python==([0-9.]+)", text, re.M)
+print(m.group(1) if m else "")
+PYEOF
+)
+if [ -n "$CV_PIN" ]; then
+  CV_WANT=$(echo "$CV_PIN" | cut -d. -f1-3)
+  cv_now() { "$VPY" -c "import cv2; print(cv2.__version__)" 2>/dev/null || true; }
+  if [ "$(cv_now)" != "$CV_WANT" ]; then
+    echo "   cv2 is '$(cv_now)', want $CV_WANT: reinstalling both OpenCV wheels"
+    "$VPY" -m pip uninstall -y -q opencv-python opencv-python-headless opencv-contrib-python 2>/dev/null || true
+    "${PIP[@]}" --no-deps "opencv-python==$CV_PIN" "opencv-python-headless==$CV_PIN"
+  fi
+  [ "$(cv_now)" = "$CV_WANT" ] || { echo "error: cv2 is '$(cv_now)', expected $CV_WANT" >&2; exit 1; }
+  echo "   cv2 $CV_WANT"
+fi
+
 if [ "${SKIP_GCLOUD:-}" != "1" ]; then
   echo "== google cloud sdk"
   if ! command -v gcloud >/dev/null 2>&1; then
