@@ -20,6 +20,10 @@ class OpenCvPinTest(unittest.TestCase):
         self.assertEqual(full, headless)
         self.assertTrue(full.startswith('4.11.'), full)
 
+    def test_viewer_timestamp_index_dependency_is_pinned_in_full_and_release_installs(self):
+        self.assertEqual(cv.requirement_pin('av'), '17.0.1')
+        self.assertEqual(cv.requirement_pin('av', ROOT/'requirements_release.txt'), '17.0.1')
+
 
 class RequirementPinTest(unittest.TestCase):
     def write(self, text, encoding):

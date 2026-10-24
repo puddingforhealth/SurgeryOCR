@@ -11,7 +11,7 @@ def _get_json_data(path: Path, error_msg: str) -> dict:
     return data
 
 
-def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[str] = None) -> dict[str, List[int]]:
+def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[str] = None, *, machine_id=None) -> dict[str, List[int]]:
     """
     加载ROI配置，支持根据视频名称自动选择对应机型的座标
     
@@ -46,6 +46,7 @@ def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[
     data = _get_json_data(path, f"ROI config not found: {path}")
     
     # 确定要使用的机型编号
+    selected_machine = machine_id
     machine_id = "1"  # 默认使用机型1
     
     if video_name and "video_machine_mapping" in data:
@@ -53,6 +54,8 @@ def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[
         if video_name in mapping:
             machine_id = str(mapping[video_name])
             print(f"根据视频 '{video_name}' 自动选择机型 {machine_id}")
+    if selected_machine is not None:
+        machine_id = str(selected_machine)
     
     # 处理新格式（包含 regions 字段）
     if "regions" in data:
@@ -92,7 +95,7 @@ def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[
     
     return result
 
-def load_roi_header_config(path: Path = Path("config/rois.json"), video_name: Optional[str] = None) -> dict[str, List[int]]:
+def load_roi_header_config(path: Path = Path("config/rois.json"), video_name: Optional[str] = None, *, machine_id=None) -> dict[str, List[int]]:
     """
     加载ROI header配置，支持根据视频名称自动选择对应机型的座标
     
@@ -106,12 +109,15 @@ def load_roi_header_config(path: Path = Path("config/rois.json"), video_name: Op
     data = _get_json_data(path, f"ROI config not found: {path}")
     
     # 确定要使用的机型编号
+    selected_machine = machine_id
     machine_id = "1"  # 默认使用机型1
     
     if video_name and "video_machine_mapping" in data:
         mapping = data["video_machine_mapping"]
         if video_name in mapping:
             machine_id = str(mapping[video_name])
+    if selected_machine is not None:
+        machine_id = str(selected_machine)
     
     # 处理新格式（包含 regions 字段）
     if "regions" in data:

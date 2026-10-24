@@ -44,6 +44,12 @@ from utils.get_configs import (
     get_roi_config_path, save_roi_config
 )
 from utils.get_paths import get_analysis_root, resolve_video_analysis_dir, set_analysis_root
+from utils.viewer_context import analysis_machine, machine_config
+from utils.video_display import fit_video_size
+from utils.workstation_theme import COLORS as UI, MONO, WidgetHint, install_theme, button as ui_button
+from utils.workstation_interactions import SHORTCUTS, ReadoutFeedback, format_timecode, navigation_owned_by_widget
+from utils.indexed_video import IndexedVideoCapture, VideoIndexError
+from utils.viewer_reference import ReferenceChecker, recorded_segment, region_segments
 
 # --- 兼容 PyInstaller 的路徑處理 ---
 def resource_path(relative_path):
@@ -90,8 +96,11 @@ class VideoAnnotator(tk.Frame):
         super().__init__(master)
         self.master = master
         
-        self.master.title("Frame Annotation Tool")
-        self.master.geometry("1350x750")
+        self.master.title("SurgeryOCR — 手術影像分析工作站")
+        self.master.geometry("1440x900")
+        self.master.minsize(1050, 720)
+        self.ui_style = install_theme(master)
+        self.configure(bg=UI["background"])
         self.master.protocol("WM_DELETE_WINDOW", self._on_closing)
         self.pack(fill="both", expand=True)
         
@@ -103,6 +112,12 @@ class VideoAnnotator(tk.Frame):
         self.total_frames = 0
         self.fps = 30
         self.current_frame_idx = 0
+        self._last_video_frame = None
+        self._video_resize_after = None
+        self._video_viewport_size = None
+        self._readout_frame = None
+        self.motion_enabled = tk.BooleanVar(value=True)
+        self._shortcut_window = None
         self.playback_active = False
         self._play_loop_id = None
         
@@ -121,6 +136,8 @@ class VideoAnnotator(tk.Frame):
         
         # 控制表格同步的標誌
         self._user_clicked_treeview = False  # 用戶是否手動點擊了表格
+        self._programmatic_tree_selection = None
+        self._tree_selection_generation = 0
         self.sub_roi_coords = None
         self.region_name = ""
         self.roi_dict = {}
@@ -180,10 +197,7 @@ class VideoAnnotator(tk.Frame):
         }
         
         # ROI圖像快取系統
-        self.roi_image_cache = {}  # {region_name: cached_image_array}
-        diff_rules = load_diff_rules()
-        region_config = diff_rules.get(self.region_name, {})         
-        self.cache_hit_threshold = region_config.get("diff_threshold", 60.0)  # RMSE閾值，低於此值認為是cache hit
+        self._reference_checker = None
         # 各階段區域上一幀 ROI 快取
         self.previous_stage_roi_images = {}
 
@@ -228,11 +242,116 @@ class VideoAnnotator(tk.Frame):
         # 預加載OCR ROI配置
         self._load_roi_config()
 
-        master.bind("<Left>", self._on_left_key)
-        master.bind("<Right>", self._on_right_key)
-        master.bind("<Up>", self._on_up_key)
-        master.bind("<Down>", self._on_down_key)
-        master.bind("<space>", self._toggle_playback)
+        for sequence, _, _, action in SHORTCUTS:
+            master.bind(sequence, lambda event, action=action: self._on_shortcut(action, event))
+        # Handle before Treeview's native class bindings, avoiding a double event step.
+        for sequence, _, _, action in SHORTCUTS:
+            self.tree.bind(sequence, lambda event, action=action: self._on_shortcut(action, event))
+
+    def _on_shortcut(self, action, event=None):
+        if event is not None:
+            widget = event.widget
+            # Keyboard events in text and selection controls belong to that control.
+            navigation = {'play', 'previous_frame', 'next_frame', 'previous_second', 'next_second',
+                          'previous_event', 'next_event', 'first', 'last', 'edit'}
+            if action in navigation and navigation_owned_by_widget(widget.winfo_class(), space=action == 'play'):
+                return None
+        if action == 'open':
+            self._load_video()
+        elif action == 'results':
+            self._choose_analysis_root()
+        elif action == 'save':
+            if not self.surgery_stage_mode:
+                self._save_annotations(self.region_name, notify=False)
+        elif action == 'goto':
+            self._stop_playback()
+            self.goto_var.set(self.current_frame_idx)
+            self.goto_entry.focus_set()
+            self.goto_entry.selection_range(0, 'end')
+        elif action == 'play':
+            self._toggle_playback()
+        elif action in ('previous_frame', 'next_frame', 'previous_second', 'next_second', 'first', 'last'):
+            self._stop_playback()
+            if self.video_total_frames > 0:
+                delta = -1 if action.startswith('previous') else 1
+                target = (0 if action == 'first' else self.video_total_frames-1 if action == 'last'
+                          else self._frame_at_time(self._frame_time(self.current_frame_idx)+delta)
+                          if action.endswith('second') else
+                          max(0, min(self.video_total_frames-1, self.current_frame_idx+delta)))
+                self._is_arrow_key_navigation = True
+                self._show_frame(target)
+        elif action in ('previous_event', 'next_event'):
+            if self.tree.get_children():
+                (self._on_up_key if action == 'previous_event' else self._on_down_key)()
+        elif action in ('ocr', 'stage'):
+            self.mode_notebook.select(self.ocr_mode_frame if action == 'ocr' else self.surgery_mode_frame)
+        elif action in ('previous_region', 'next_region'):
+            combo = self.surgery_stage_combobox if self.surgery_stage_mode else self.region_combobox
+            values = list(combo['values'])
+            if values:
+                current = values.index(combo.get()) if combo.get() in values else 0
+                combo.set(values[(current + (-1 if action == 'previous_region' else 1)) % len(values)])
+                combo.event_generate('<<ComboboxSelected>>')
+        elif action == 'edit':
+            if self.tree.selection():
+                self._on_edit_annotation(event)
+        elif action == 'review':
+            self.master.focus_set()
+        elif action == 'help':
+            self._show_shortcuts()
+        return 'break'
+
+    def _show_shortcuts(self):
+        if self._shortcut_window is not None and self._shortcut_window.winfo_exists():
+            self._shortcut_window.lift()
+            self._shortcut_window.focus_force()
+            return
+        dialog = tk.Toplevel(self)
+        self._shortcut_window = dialog
+        dialog.title('SurgeryOCR — 鍵盤操作')
+        dialog.transient(self.master)
+        dialog.resizable(False, False)
+        content = tk.Frame(dialog, padx=22, pady=16)
+        content.pack(fill='both', expand=True)
+        tk.Label(content, text='鍵盤操作', font=('Microsoft JhengHei UI', 16, 'bold'),
+                 anchor='w').grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 6))
+        tk.Label(content, text='輸入框保留游標操作；Esc 返回影片操作。', fg=UI['muted'],
+                 anchor='w').grid(row=1, column=0, columnspan=2, sticky='w', pady=(0, 12))
+        for row, (_, key, description, _) in enumerate((s for s in SHORTCUTS if s[1]), start=2):
+            tk.Label(content, text=key, fg=UI['accent'], font=MONO, anchor='w'
+                     ).grid(row=row, column=0, sticky='w', padx=(0, 24), pady=4)
+            tk.Label(content, text=description, anchor='w').grid(row=row, column=1, sticky='w', pady=4)
+        tk.Checkbutton(content, text='啟用幀號／時間變動高亮', variable=self.motion_enabled,
+                       selectcolor=UI['raised'], command=self._readout_feedback.stop,
+                       anchor='w').grid(row=30, column=0, columnspan=2, sticky='w', pady=(14, 4))
+        def close(event=None):
+            dialog.destroy()
+            self.master.focus_set()
+            return 'break'
+        ui_button(content, '返回工作區  Esc', close).grid(row=31, column=0, columnspan=2, sticky='e', pady=(8, 0))
+        dialog.bind('<Escape>', close)
+        dialog.update_idletasks()
+        dialog.focus_force()
+
+    def _update_frame_readout(self, frame_idx, timestamp_sec, *, animate=True):
+        changed = self._readout_frame != frame_idx
+        self._readout_frame = frame_idx
+        self.lbl_frame_num.config(text=f'FRAME  {frame_idx:,}')
+        self.lbl_timecode.config(text=f'{format_timecode(timestamp_sec)} / {format_timecode(self.video_duration)}')
+        if changed and animate and self.motion_enabled.get():
+            self._readout_feedback.pulse()
+        elif not animate or not self.motion_enabled.get():
+            self._readout_feedback.stop()
+
+    def _frame_time(self, frame_idx):
+        if isinstance(self.video_cap, IndexedVideoCapture):
+            return self.video_cap.frame_time(frame_idx)
+        return frame_idx / (self.video_fps or 30)
+
+    def _frame_at_time(self, seconds):
+        if isinstance(self.video_cap, IndexedVideoCapture):
+            return self.video_cap.frame_at_time(seconds)
+        return max(0, min(self.video_total_frames-1, int(seconds*self.video_fps)))
 
     def _on_left_key(self, event=None):
         """處理左鍵事件 - 前一幀"""
@@ -352,10 +471,10 @@ class VideoAnnotator(tk.Frame):
             content = self.tree.set(selected_id, "content")
 
             # 轉換為時間戳
-            timestamp_sec = frame_idx / self.video_fps
+            timestamp_sec = self._frame_time(frame_idx)
 
             print(f"跳轉到選中的時間: {timestamp_sec:.2f}s (幀: {frame_idx})")
-            self._jump_to_timestamp(timestamp_sec)
+            self._show_frame(frame_idx)
 
             # 更新狀態欄
             self._update_status_bar(f"已跳轉到時間 {timestamp_sec:.2f}s (幀 {frame_idx}): {content}")
@@ -364,242 +483,216 @@ class VideoAnnotator(tk.Frame):
             print(f"跳轉到選中幀時出錯: {e}")
 
     def _create_widgets(self):
-        """創建 GUI 界面元素"""
-        
-        # 初始化變數（需要在UI創建前）
-        # ========================= HEADER 區域 =========================
-        header_frame = tk.Frame(self, relief="groove", bd=2)
-        header_frame.pack(fill="x", padx=5, pady=5)
-        
-        # Header 左半邊：設定和控制 (固定寬度50%)
-        header_left = tk.Frame(header_frame)
-        header_left.pack(side="left", fill="both", expand=True, padx=(5, 2), pady=5)
-        
-        # 影片路徑和基礎控制
-        video_control_frame = tk.Frame(header_left)
-        video_control_frame.pack(fill="x", pady=(0, 5))
-        
-        self.btn_load = tk.Button(video_control_frame, text="載入影片", command=self._load_video)
-        self.btn_load.pack(side="left", padx=(0, 10))
-        
-        self.lbl_video_path = tk.Label(video_control_frame, text="未選擇影片")
-        self.lbl_video_path.pack(side="left", padx=5)
+        """Build the review workspace; existing commands own all analysis behavior."""
+        # Compact identity strip: no simulated live/AI/medical measurements.
+        brand = tk.Frame(self, bg=UI['background'])
+        brand.pack(fill='x', padx=18, pady=(7, 6))
+        tk.Label(brand, text='◉', fg=UI['accent'], bg=UI['background'],
+                 font=('Segoe UI', 18)).pack(side='left', padx=(0, 10))
+        tk.Label(brand, text='SurgeryOCR', bg=UI['background'],
+                 font=('Segoe UI', 17, 'bold')).pack(side='left')
+        tk.Label(brand, text='手術影像分析工作站', fg=UI['muted'], bg=UI['background'],
+                 font=('Microsoft JhengHei UI', 10)).pack(side='left', padx=18)
+        ui_button(brand, '快捷鍵  F1', self._show_shortcuts, padx=9, pady=2).pack(side='right')
+        tk.Label(brand, text='SURGICAL REVIEW', fg=UI['muted'], padx=12,
+                 bg=UI['background'], font=('Consolas', 9)).pack(side='right')
 
-        self.btn_analysis_root = tk.Button(video_control_frame, text="分析資料夾…", command=self._choose_analysis_root)
-        self.btn_analysis_root.pack(side="left", padx=(10, 5))
-
-        self.lbl_analysis_dir = tk.Label(video_control_frame, text="", fg="gray30")
-        self.lbl_analysis_dir.pack(side="left", padx=5)
+        # File operations and paths occupy separate rows so long names cannot hide buttons.
+        files = tk.Frame(self, bg=UI['panel'], highlightthickness=1,
+                         highlightbackground=UI['border'])
+        files.pack(fill='x', padx=16, pady=(0, 8))
+        actions = tk.Frame(files)
+        actions.pack(fill='x', padx=12, pady=(8, 6))
+        self.btn_load = ui_button(actions, '＋ 載入影片', self._load_video, primary=True)
+        self.btn_load.pack(side='left', padx=(0, 8))
+        self.btn_analysis_root = ui_button(actions, '分析資料夾…', self._choose_analysis_root)
+        self.btn_analysis_root.pack(side='left')
+        self.lbl_video_path = tk.Label(actions, text='選擇影片以開始檢視', fg=UI['muted'],
+                                       anchor='w', width=1)
+        self.lbl_video_path.pack(side='left', fill='x', expand=True, padx=16)
+        self.btn_save = ui_button(actions, '儲存標註', lambda: self._save_annotations(self.region_name))
+        self.btn_save.pack(side='right')
+        path_row = tk.Frame(files)
+        path_row.pack(fill='x', padx=14, pady=(0, 7))
+        tk.Label(path_row, text='RESULT SOURCE', fg=UI['accent'], font=('Consolas', 8)).pack(side='left')
+        self.lbl_analysis_dir = tk.Label(path_row, text='', fg=UI['muted'], anchor='w', width=1,
+                                         font=('Microsoft JhengHei UI', 9))
+        self.lbl_analysis_dir.pack(side='left', fill='x', expand=True, padx=(12, 0))
         self._update_analysis_dir_label()
 
-        
-        self.btn_save = tk.Button(video_control_frame, text="儲存標註", command=lambda: self._save_annotations(self.region_name))
-        self.btn_save.pack(side="right", padx=(0, 10))
-        
-        # 模式選擇標籤頁
-        self.mode_notebook = ttk.Notebook(header_left)
-        self.mode_notebook.pack(fill="x", pady=(0, 3))
-        
-        # OCR 模式標籤頁
+        # Review mode and frame comparisons stay visible without competing with the video.
+        header = tk.Frame(self, bg=UI['background'])
+        header.pack(fill='x', padx=16, pady=(0, 8))
+        compare = tk.Frame(header, width=350, height=80, highlightthickness=1,
+                           highlightbackground=UI['border'])
+        compare.pack(side='right', fill='y', padx=(8, 0))
+        compare.pack_propagate(False)
+        compare_title = tk.Frame(compare)
+        compare_title.pack(fill='x', padx=10, pady=(6, 4))
+        tk.Label(compare_title, text='ROI 影格對比', fg=UI['muted'],
+                 font=('Microsoft JhengHei UI', 9, 'bold')).pack(side='left')
+        self.roi_diff_label = tk.Label(compare_title, text='Diff: -', fg=UI['accent'], font=MONO)
+        self.roi_diff_label.pack(side='right')
+        previews = tk.Frame(compare)
+        previews.pack(fill='both', expand=True, padx=10, pady=(0, 8))
+        previews.columnconfigure((0, 1), weight=1, uniform='previews')
+        previews.rowconfigure(1, weight=1)
+        for column, text in enumerate(('上一影格', '目前影格')):
+            tk.Label(previews, text=text, fg=UI['muted'], font=('Microsoft JhengHei UI', 8)
+                     ).grid(row=0, column=column, sticky='w', padx=(0, 6))
+        self.stage_roi_preview_label = tk.Label(previews, bg=UI['video'])
+        self.stage_roi_preview_label.grid(row=1, column=0, sticky='nsew', padx=(0, 4))
+        self.current_roi_preview_label = tk.Label(previews, bg=UI['video'])
+        self.current_roi_preview_label.grid(row=1, column=1, sticky='nsew', padx=(4, 0))
+
+        self.mode_notebook = ttk.Notebook(header)
+        self.mode_notebook.pack(side='left', fill='both', expand=True)
         self.ocr_mode_frame = ttk.Frame(self.mode_notebook)
-        self.mode_notebook.add(self.ocr_mode_frame, text="OCR 標註模式")
-        
-        # OCR ROI 設定
-        ocr_roi_frame = tk.LabelFrame(self.ocr_mode_frame, text="OCR ROI 設定", relief="flat", bd=1)
-        ocr_roi_frame.pack(fill="x", pady=(5, 3), padx=5)
-        
-        ocr_row1 = tk.Frame(ocr_roi_frame)
-        ocr_row1.pack(fill="x", padx=5, pady=2)
-        
-        tk.Label(ocr_row1, text="區域:").pack(side="left")
-        self.region_var = tk.StringVar()
-        self.region_combobox = ttk.Combobox(ocr_row1, textvariable=self.region_var, state="readonly", width=8)
-        self.region_combobox.pack(side="left", padx=2)
-        self.region_combobox.bind("<<ComboboxSelected>>", self._on_region_select)
-        
-        # tk.Button(ocr_row1, text="新增", command=self._on_add_region).pack(side="left", padx=2)
-        # tk.Button(ocr_row1, text="儲存組態", command=self._save_roi_config).pack(side="left", padx=2)
-        
-        # ocr_row2 = tk.Frame(ocr_roi_frame)
-        # ocr_row2.pack(fill="x", padx=5, pady=2)
-        
-        # tk.Label(ocr_row2, text="座標:").pack(side="left")
-        # for text, var_tuple in [("x1", self.roi_x1_var), ("y1", self.roi_y1_var), ("x2", self.roi_x2_var), ("y2", self.roi_y2_var)]:
-        #     tk.Label(ocr_row2, text=f"{text}:").pack(side="left")
-        #     ttk.Spinbox(ocr_row2, from_=0, to=99999, width=5, textvariable=var_tuple).pack(side="left", padx=(0,3))
-        # tk.Button(ocr_row2, text="套用", command=self._apply_roi_from_fields).pack(side="left", padx=3)
-        
-        # 手術階段分析模式標籤頁
         self.surgery_mode_frame = ttk.Frame(self.mode_notebook)
-        self.mode_notebook.add(self.surgery_mode_frame, text="手術階段分析模式")
-        
-        # 手術階段ROI 設定
-        surgery_roi_frame = tk.LabelFrame(self.surgery_mode_frame, text="手術階段ROI 設定", relief="flat", bd=1)
-        surgery_roi_frame.pack(fill="x", pady=(5, 3), padx=5)
-        
-        surgery_row1 = tk.Frame(surgery_roi_frame)
-        surgery_row1.pack(fill="x", padx=5, pady=2)
-        
-        tk.Label(surgery_row1, text="區域:").pack(side="left")
-        self.surgery_stage_region_var = tk.StringVar()
-        self.surgery_stage_combobox = ttk.Combobox(surgery_row1, textvariable=self.surgery_stage_region_var, state="readonly", width=10)
-        self.surgery_stage_combobox.pack(side="left", padx=2)
-        self.surgery_stage_combobox.bind("<<ComboboxSelected>>", self._on_surgery_stage_region_select)
-        
-        # tk.Button(surgery_row1, text="新增", command=self._on_add_surgery_stage_region).pack(side="left", padx=2)
-        
-        # surgery_row2 = tk.Frame(surgery_roi_frame)
-        # surgery_row2.pack(fill="x", padx=5, pady=2)
-        
-        # tk.Label(surgery_row2, text="座標:").pack(side="left")
-        # for text, var_tuple in [("x1", self.surgery_stage_x1_var), ("y1", self.surgery_stage_y1_var), ("x2", self.surgery_stage_x2_var), ("y2", self.surgery_stage_y2_var)]:
-        #     tk.Label(surgery_row2, text=f"{text}:").pack(side="left")
-        #     ttk.Spinbox(surgery_row2, from_=0, to=99999, width=5, textvariable=var_tuple).pack(side="left", padx=(0,3))
-        # tk.Button(surgery_row2, text="套用", command=self._apply_surgery_stage_roi_from_fields).pack(side="left", padx=3)
-        
-        # 綁定標籤頁切換事件
-        self.mode_notebook.bind("<<NotebookTabChanged>>", self._on_mode_tab_changed)
-        
-        # 默認選擇OCR模式標籤頁
+        self.mode_notebook.add(self.ocr_mode_frame, text='OCR 數值標註')
+        self.mode_notebook.add(self.surgery_mode_frame, text='手術階段分析')
+        for parent, label in ((self.ocr_mode_frame, 'OCR 監測區域'),
+                              (self.surgery_mode_frame, '手術階段區域')):
+            row = tk.Frame(parent)
+            row.pack(fill='x', padx=14, pady=6)
+            tk.Label(row, text=label, fg=UI['muted']).pack(side='left', padx=(0, 12))
+            if parent is self.ocr_mode_frame:
+                self.region_var = tk.StringVar()
+                self.region_combobox = ttk.Combobox(row, textvariable=self.region_var,
+                                                     state='readonly', width=12)
+                self.region_combobox.pack(side='left')
+                self.region_combobox.bind('<<ComboboxSelected>>', self._on_region_select)
+            else:
+                self.surgery_stage_region_var = tk.StringVar()
+                self.surgery_stage_combobox = ttk.Combobox(row, textvariable=self.surgery_stage_region_var,
+                                                            state='readonly', width=12)
+                self.surgery_stage_combobox.pack(side='left')
+                self.surgery_stage_combobox.bind('<<ComboboxSelected>>', self._on_surgery_stage_region_select)
+        self.mode_notebook.bind('<<NotebookTabChanged>>', self._on_mode_tab_changed)
         self.mode_notebook.select(self.ocr_mode_frame)
-        
-        # 初始化模式相關控制項的顯示狀態
         self._update_mode_specific_controls()
-        
-        # Header 右半邊：ROI 預覽對比 (固定寬度50%)
-        header_right = tk.Frame(header_frame, relief="sunken", bd=1)
-        header_right.pack(side="right", fill="both", expand=True, padx=(2, 5), pady=5)
-        
-        roi_compare_frame = tk.LabelFrame(header_right, text="ROI 對比")
-        roi_compare_frame.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        # 預覽圖像區域
-        preview_area = tk.Frame(roi_compare_frame)
-        preview_area.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        last_frame = tk.LabelFrame(preview_area, text="Last")
-        last_frame.pack(side="left", fill="both", expand=True, padx=(0, 2))
-        self.stage_roi_preview_label = tk.Label(last_frame, bg="black")
-        self.stage_roi_preview_label.pack(fill="both", expand=True, padx=2, pady=2)
-        
-        current_frame = tk.LabelFrame(preview_area, text="Current")
-        current_frame.pack(side="left", fill="both", expand=True, padx=(2, 0))
-        self.current_roi_preview_label = tk.Label(current_frame, bg="black")
-        self.current_roi_preview_label.pack(fill="both", expand=True, padx=2, pady=2)
-        
-        # 資訊顯示
-        info_area = tk.Frame(roi_compare_frame)
-        info_area.pack(fill="x", padx=5, pady=(0, 5))
-        
-        self.roi_diff_label = tk.Label(info_area, text="Diff: -", font=("Courier", 9))
-        self.roi_diff_label.pack(fill="x")
 
-        # ========================= BODY 區域 =========================
-        body_frame = tk.Frame(self)
-        body_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+        # Reserve the footer and timeline before the expanding video body.
+        footer = tk.Frame(self, bg=UI['background'])
+        footer.pack(side='bottom', fill='x', padx=18, pady=(4, 9))
+        tk.Label(footer, textvariable=self.status_var, fg=UI['muted'], bg=UI['background'],
+                 font=('Microsoft JhengHei UI', 9), anchor='w', width=1
+                 ).pack(side='left', fill='x', expand=True)
+        tk.Label(footer, text='SPACE 播放    ← → 逐幀    ↑ ↓ 事件    F1 快捷鍵', fg=UI['muted'],
+                 bg=UI['background'], font=('Microsoft JhengHei UI', 9)).pack(side='right')
 
-        # Body 左側：影片顯示
-        video_frame = tk.Frame(body_frame, width=self.VID_W, height=self.VID_H, bd=1, relief="sunken", bg="black")
-        video_frame.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        video_frame.pack_propagate(False)
+        timeline_frame = tk.Frame(self, highlightthickness=1, highlightbackground=UI['border'])
+        timeline_frame.pack(side='bottom', fill='x', padx=16, pady=(0, 5))
+        timeline_frame.grid_columnconfigure(1, weight=1)
+        control_panel = tk.Frame(timeline_frame, width=245)
+        control_panel.grid(row=0, column=0, rowspan=3, sticky='nsew', padx=12, pady=8)
+        control_panel.pack_propagate(False)
+        self.lbl_frame_num = tk.Label(control_panel, text='FRAME  —',
+                                      fg=UI['text'], font=('Consolas', 13, 'bold'), anchor='w')
+        self.lbl_frame_num.pack(fill='x')
+        self.lbl_timecode = tk.Label(control_panel, text='00:00:00.00 / 00:00:00.00',
+                                     fg=UI['text'], font=('Consolas', 9), anchor='w')
+        self.lbl_timecode.pack(fill='x', pady=(1, 7))
+        self._readout_feedback = ReadoutFeedback(self, self.lbl_frame_num, self.lbl_timecode)
+        transport = tk.Frame(control_panel)
+        transport.pack(fill='x')
+        self.btn_play = ui_button(transport, '▶ 播放', self._toggle_playback, primary=True, width=7)
+        self.btn_play.pack(side='left', padx=(0, 8))
+        self.goto_var = tk.IntVar(value=0)
+        self.goto_entry = ttk.Entry(transport, textvariable=self.goto_var, width=7, font=MONO)
+        self.goto_entry.pack(side='left')
+        self.goto_entry.bind('<Return>', self._on_goto_frame)
+        ui_button(transport, '跳幀', self._on_goto_frame, padx=7).pack(side='left', padx=(5, 0))
+        tk.Label(timeline_frame, text='分析時間軸 · 實際時間', fg=UI['muted'], anchor='w',
+                 font=('Microsoft JhengHei UI', 9, 'bold')).grid(row=0, column=1, sticky='ew', pady=(8, 0))
+        self.slider_var = tk.DoubleVar()
+        self.slider = ttk.Scale(timeline_frame, from_=0, to=100, orient='horizontal',
+                                 variable=self.slider_var, command=self._on_slider_move)
+        self.slider.grid(row=1, column=1, sticky='ew', padx=(0, 12), pady=(4, 6))
+        self.slider.bind('<ButtonRelease-1>', self._on_slider_release)
+        for key in ('Left', 'Right', 'Home', 'End', 'Prior', 'Next'):
+            self.slider.bind(f'<KeyRelease-{key}>', self._on_slider_release)
+        tracks_container = tk.Frame(timeline_frame)
+        tracks_container.grid(row=2, column=1, sticky='nsew', padx=(0, 12), pady=(0, 8))
+        self.timeline_labels_frame = tk.Frame(tracks_container)
+        self.timeline_labels_frame.pack(side='left', fill='y')
+        self.timeline_tracks_frame = tk.Frame(tracks_container)
+        self.timeline_tracks_frame.pack(side='left', fill='both', expand=True)
 
-        self.lbl_video = tk.Label(video_frame, bg="black")
-        self.lbl_video.pack(fill="both", expand=True)
-        self.roi_rect_id = None
-
-        # self._create_control_hint_widget(video_frame)
-
-        # Body 右側：標註樹（設置固定寬度，可動態調整）
-        self.annotation_frame = tk.Frame(body_frame, width=320)  # 初始寬度，會根據模式動態調整
-        self.annotation_frame.pack(side="right", fill="y")
-        self.annotation_frame.pack_propagate(False)  # 防止子元件改變frame大小
-
-        tree_yscroll = ttk.Scrollbar(self.annotation_frame, orient="vertical")
-        tree_yscroll.pack(side="right", fill="y")
-        tree_xscroll = ttk.Scrollbar(self.annotation_frame, orient="horizontal")
-        tree_xscroll.pack(side="bottom", fill="x")
-
-        # 初始化時使用基本欄位，後續動態調整
-        self.tree = ttk.Treeview(self.annotation_frame, columns=("frame", "content"),
-                                 show="headings", yscrollcommand=tree_yscroll.set,
-                                 xscrollcommand=tree_xscroll.set)
-        self.tree.pack(side="left", fill="both")
-        # 初始化基本欄位設置
-        self.tree.heading("frame", text="時間(幀號)")
-        self.tree.heading("content", text="標註內容")
-        self.tree.column("frame", width=frame_width+30, anchor="center")  # 加寬以容納時間格式
-        self.tree.column("content", width=content_width, anchor="center")
+        body = tk.Frame(self, bg=UI['background'])
+        body.pack(fill='both', expand=True, padx=16, pady=(0, 8))
+        self.annotation_frame = tk.Frame(body, width=320, highlightthickness=1,
+                                         highlightbackground=UI['border'])
+        self.annotation_frame.pack(side='right', fill='y')
+        self.annotation_frame.pack_propagate(False)
+        annotation_heading = tk.Frame(self.annotation_frame)
+        annotation_heading.pack(fill='x', padx=12, pady=(11, 10))
+        tk.Label(annotation_heading, text='事件紀錄', font=('Microsoft JhengHei UI', 11, 'bold')
+                 ).pack(side='left')
+        self.lbl_event_count = tk.Label(annotation_heading, text='0 筆', fg=UI['accent'],
+                                         font=('Microsoft JhengHei UI', 9))
+        self.lbl_event_count.pack(side='right')
+        tree_area = tk.Frame(self.annotation_frame)
+        tree_area.pack(fill='both', expand=True)
+        tree_yscroll = ttk.Scrollbar(tree_area, orient='vertical')
+        tree_yscroll.pack(side='right', fill='y')
+        tree_xscroll = ttk.Scrollbar(tree_area, orient='horizontal')
+        tree_xscroll.pack(side='bottom', fill='x')
+        self.tree = ttk.Treeview(tree_area, columns=('frame', 'content'), show='headings',
+                                 yscrollcommand=tree_yscroll.set, xscrollcommand=tree_xscroll.set)
+        self.tree.pack(side='left', fill='both', expand=True)
+        self.tree.tag_configure('review_alternate', background=UI['raised'])
+        self.empty_events_label = tk.Label(self.tree, text='載入影片後顯示分析事件', fg=UI['muted'])
+        self.tree.heading('frame', text='時間(幀號)')
+        self.tree.heading('content', text='標註內容')
+        self.tree.column('frame', width=frame_width+30, anchor='center')
+        self.tree.column('content', width=content_width, anchor='center')
         tree_yscroll.config(command=self.tree.yview)
         tree_xscroll.config(command=self.tree.xview)
-
-        self.tree.bind("<Double-1>", self._on_edit_annotation)
-        self.tree.bind("<Return>", self._on_edit_annotation)
+        self.tree.bind('<Double-1>', self._on_edit_annotation)
+        self.tree.bind('<Return>', self._on_edit_annotation)
         self.tree.bind('<<TreeviewSelect>>', self._on_treeview_select)
         self._setup_treeview_context_menu()
 
-        # ========================= TIMELINE 區域 =========================
-        timeline_frame = tk.Frame(self, relief="groove", bd=1)
-        timeline_frame.pack(side="bottom", fill="x", padx=5, pady=5)
-
-        # --- Use a single Grid to manage all timeline components for perfect alignment ---
-        timeline_frame.grid_columnconfigure(1, weight=1)
-
-        # -- Row 0: Main Slider --
-        # Column 0: 時間/幀號顯示 + 跳轉控制
-        control_panel = tk.Frame(timeline_frame, width=200)
-        control_panel.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 2))
-        control_panel.pack_propagate(False)
-
-        # 時間/幀號顯示
-        self.lbl_frame_num = tk.Label(control_panel, text="時間: 0.00s / 0.00s (幀: 0)", font=("Arial", 9))
-        self.lbl_frame_num.pack(pady=(5, 2))
-
-        # 跳轉控制（緊接在時間顯示下方）
-        goto_frame = tk.Frame(control_panel)
-        goto_frame.pack(pady=2)
-        tk.Label(goto_frame, text="跳至幀:", font=("Arial", 9)).pack(side="left")
-        self.goto_var = tk.IntVar(value=0)
-        self.goto_entry = ttk.Entry(goto_frame, textvariable=self.goto_var, width=7)
-        self.goto_entry.pack(side="left", padx=2)
-        self.goto_entry.bind("<Return>", self._on_goto_frame)
-        tk.Button(goto_frame, text="Go", command=self._on_goto_frame).pack(side="left", padx=2)
-
-        # 播放按鈕
-        self.btn_play = tk.Button(control_panel, text="▶ 播放", command=self._toggle_playback, width=10)
-        self.btn_play.pack(pady=5)
-
-        # Column 1: Slider
-        slider_frame = tk.Frame(timeline_frame)
-        slider_frame.grid(row=0, column=1, sticky="ew", pady=(2, 3))
-        
-        self.slider_var = tk.DoubleVar()
-        self.slider = ttk.Scale(slider_frame, from_=0, to=100, orient="horizontal",
-                                variable=self.slider_var, command=self._on_slider_move)
-        self.slider.bind("<ButtonRelease-1>", self._on_slider_release)
-        self.slider.pack(fill="x", expand=True)
-
-        # -- Row 1: Multi-Track Timelines --
-        # Column 0 is now occupied by control_panel (rowspan=2)
-        
-        # Column 1: A container for all track labels + canvases
-        tracks_container = tk.Frame(timeline_frame)
-        tracks_container.grid(row=1, column=1, sticky="nsew")
-
-        # Labels frame (left side of tracks)
-        self.timeline_labels_frame = tk.Frame(tracks_container)
-        self.timeline_labels_frame.pack(side="left", fill="y")
-
-        # Tracks frame (right side)
-        self.timeline_tracks_frame = tk.Frame(tracks_container)
-        self.timeline_tracks_frame.pack(side="left", fill="both", expand=True)
-
+        video_card = tk.Frame(body, highlightthickness=1, highlightbackground=UI['border'])
+        video_card.pack(side='left', fill='both', expand=True, padx=(0, 10))
+        video_heading = tk.Frame(video_card)
+        video_heading.pack(fill='x', padx=12, pady=(9, 8))
+        tk.Label(video_heading, text='手術影像', font=('Microsoft JhengHei UI', 11, 'bold')
+                 ).pack(side='left')
+        self.lbl_video_meta = tk.Label(video_heading, text='等比例檢視  /  ROI 疊圖', fg=UI['muted'],
+                                       font=('Consolas', 9), width=1, anchor='e')
+        self.lbl_video_meta.pack(side='left', fill='x', expand=True, padx=(12, 0))
+        video_frame = tk.Frame(video_card, width=self.VID_W, height=self.VID_H, bg=UI['video'])
+        video_frame.pack(fill='both', expand=True, padx=1, pady=(0, 1))
+        video_frame.pack_propagate(False)
+        self.lbl_video = tk.Label(video_frame, bg=UI['video'], fg=UI['muted'], bd=0,
+                                  highlightthickness=0, padx=0, pady=0,
+                                  text='手術影像工作區\n\n載入影片，檢視 OCR 數值與手術階段',
+                                  font=('Microsoft JhengHei UI', 13), justify='center')
+        self.lbl_video.pack(fill='both', expand=True)
+        self.lbl_video.bind('<Configure>', self._on_video_resize)
+        self.roi_rect_id = None
         self._update_roi_fields()
         self._update_roi_ui()
+        self._ui_hints = [
+            WidgetHint(self.btn_load, '載入影片 · Ctrl+O'),
+            WidgetHint(self.btn_analysis_root, '選擇分析資料夾 · Ctrl+Shift+O'),
+            WidgetHint(self.btn_save, '儲存 OCR 標註 · Ctrl+S'),
+            WidgetHint(self.btn_play, '播放／暫停 · Space'),
+            WidgetHint(self.goto_entry, '輸入 0 起算的幀號 · Enter 跳轉 · Esc 返回影片'),
+            WidgetHint(self.lbl_video_path, lambda: str(self.video_path) if self.video_path else '載入影片以開始檢視'),
+            WidgetHint(self.lbl_analysis_dir, lambda: self.lbl_analysis_dir.cget('text')),
+        ]
+        self.tree.bind('<<ReviewSelectionSettled>>', self._finish_tree_selection)
+        self.tree.bind('<ButtonPress-1>', self._clear_programmatic_tree_selection, add='+')
+        self._update_event_summary()
+
 
     def _format_frame_display(self, frame_idx: int) -> str:
         """將幀號格式化為時間顯示: "12.34s(371)" """
         if self.video_fps > 0:
-            timestamp_sec = frame_idx / self.video_fps
+            timestamp_sec = self._frame_time(frame_idx)
             return f"{timestamp_sec:.2f}s({frame_idx})"
         else:
             return str(frame_idx)
@@ -781,7 +874,10 @@ class VideoAnnotator(tk.Frame):
 
         try:
             # 初始化 video player 的 VideoCapture
-            self.video_cap = cv2.VideoCapture(filepath)
+            self._update_status_bar('正在建立／載入影片時間戳索引…')
+            self.master.configure(cursor='watch')
+            self.master.update_idletasks()
+            self.video_cap = IndexedVideoCapture(filepath)
             if not self.video_cap.isOpened():
                 messagebox.showerror("錯誤", "無法開啟影片檔案")
                 self.video_path = None
@@ -790,7 +886,7 @@ class VideoAnnotator(tk.Frame):
             # 取得影片資訊
             self.video_fps = self.video_cap.get(cv2.CAP_PROP_FPS) or 30.0
             self.video_total_frames = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-            self.video_duration = self.video_total_frames / self.video_fps if self.video_fps > 0 else 0
+            self.video_duration = self.video_cap.duration
             self.original_vid_w = int(self.video_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.original_vid_h = int(self.video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -802,6 +898,7 @@ class VideoAnnotator(tk.Frame):
             self.video_path = Path(filepath)
             self.video_title = self.video_path.stem
             self.video_file_path = self.video_path  # 保持向後兼容
+            self.lbl_video_meta.config(text=f'{self.original_vid_w}×{self.original_vid_h}  ·  {self.video_fps:.2f} fps')
 
             if hasattr(self.lbl_video_path, 'config'):
                  self.lbl_video_path.config(text=str(self.video_path.name))
@@ -817,7 +914,7 @@ class VideoAnnotator(tk.Frame):
             if hasattr(self, 'surgery_stage_combobox'):
                 self._update_surgery_stage_roi_ui()
 
-            # 設定 slider 為以秒為單位
+            # The slider and both tracks share source PTS seconds, not FPS estimates.
             if hasattr(self, 'slider'):
                 self.slider.config(to=self.video_duration,
                                    state=tk.NORMAL if self.video_duration > 0 else tk.DISABLED)
@@ -826,8 +923,8 @@ class VideoAnnotator(tk.Frame):
             if self.video_total_frames > 0:
                 self._show_frame(0)
             else:
-                if hasattr(self, 'lbl_frame_num'): self.lbl_frame_num.config(text="幀: 0 / 0")
-                if hasattr(self, 'lbl_video'): self.lbl_video.config(image=None)
+                self._update_frame_readout(0, 0, animate=False)
+                if hasattr(self, 'lbl_video'): self.lbl_video.config(image='')
 
             self._update_status_bar(f"已載入: {self.video_title} ({self.video_duration:.1f}秒, {self.video_fps:.1f} FPS)")
             print(f"影片載入成功: {self.video_total_frames} 幀, 解析度: {self.original_vid_w}x{self.original_vid_h}")
@@ -838,12 +935,16 @@ class VideoAnnotator(tk.Frame):
 
             # 預載入OCR數據以優化性能
             self._preload_ocr_data()
+            if self.surgery_stage_mode:
+                self._refresh_treeview()
             
         except Exception as e:
             messagebox.showerror("錯誤", f"載入影片失敗: {e}")
             print(f"載入影片失敗: {e}")
             traceback.print_exc()
             self.video_file_path = None 
+        finally:
+            self.master.configure(cursor='')
 
     def _toggle_playback(self, event=None):
         """切換播放/暫停狀態"""
@@ -892,20 +993,21 @@ class VideoAnnotator(tk.Frame):
             self.current_frame_idx += 1
 
             # 計算當前時間戳
-            current_timestamp = self.current_frame_idx / self.video_fps
+            current_timestamp = self._frame_time(self.current_frame_idx)
 
             # 更新 UI (但不重新讀取，避免無限循環)
             self.slider_var.set(current_timestamp)
-            self.lbl_frame_num.config(text=f"時間: {current_timestamp:.2f}s / {self.video_duration:.2f}s (幀: {self.current_frame_idx})")
+            self._update_frame_readout(self.current_frame_idx, current_timestamp, animate=False)
 
             # 顯示幀 (使用已經讀取的圖像)
             self._display_frame_from_image(frame_pil)
-
-            # 播放期間只更新軌道位置指示器，不做其他 UI 更新以避免卡頓
+            self._update_stage_roi_preview(frame_pil)
+            if self.surgery_stage_mode:
+                self._perform_cache_comparison(frame_pil)
             self._update_track_position_indicators()
 
             # 計算下一幀的目標時間
-            target_interval = 1.0 / self.video_fps if self.video_fps > 0 else 0.033
+            target_interval = max(.001, self._frame_time(self.current_frame_idx+1)-current_timestamp)
 
             now = time.time()
             # 如果落後太多 (> 500ms)，重置目標時間
@@ -924,18 +1026,36 @@ class VideoAnnotator(tk.Frame):
             print(f"播放循環出錯: {e}")
             self._stop_playback()
 
-    def _display_frame_from_image(self, frame_pil: Image.Image):
+    def _on_video_resize(self, event):
+        size = (event.width, event.height)
+        if size == self._video_viewport_size:
+            return
+        self._video_viewport_size = size
+        if self._video_resize_after is not None:
+            self.after_cancel(self._video_resize_after)
+        self._video_resize_after = self.after(60, self._redraw_video_viewport)
+
+    def _redraw_video_viewport(self):
+        self._video_resize_after = None
+        if self._last_video_frame is not None:
+            # Resizing must not seek, advance playback, or change the selected frame.
+            self._display_frame_from_image(self._last_video_frame, focus=False)
+
+    def _display_frame_from_image(self, frame_pil: Image.Image, *, focus=True):
         """直接顯示已經讀取的 PIL 圖像，避免重新讀取"""
+        self._last_video_frame = frame_pil
+        display_w, display_h = fit_video_size(frame_pil.size,
+            (max(1, self.lbl_video.winfo_width()), max(1, self.lbl_video.winfo_height())))
         display_image = None
 
         # 預設模式: 顯示完整幀與ROI框
-        disp_pil = frame_pil.resize((self.VID_W, self.VID_H), Image.Resampling.BILINEAR)
+        disp_pil = frame_pil.resize((display_w, display_h), Image.Resampling.BILINEAR)
 
         # 繪製ROI框
         if self.original_vid_w > 0 and self.original_vid_h > 0:
             draw = ImageDraw.Draw(disp_pil)
-            scale_x = self.VID_W / self.original_vid_w
-            scale_y = self.VID_H / self.original_vid_h
+            scale_x = display_w / frame_pil.width
+            scale_y = display_h / frame_pil.height
 
             if self.surgery_stage_mode:
                 for region_name, coords in self.surgery_stage_roi_dict.items():
@@ -974,7 +1094,8 @@ class VideoAnnotator(tk.Frame):
                 self.control_hint_frame.lift()
             except:
                 pass
-        self.master.focus_set()
+        if focus:
+            self.master.focus_set()
 
     def _jump_to_timestamp(self, timestamp_sec: float):
         """跳轉到指定的時間戳"""
@@ -984,14 +1105,8 @@ class VideoAnnotator(tk.Frame):
         # 限制在有效範圍內
         timestamp_sec = max(0, min(timestamp_sec, self.video_duration))
 
-        # 更新 slider
-        self.slider.set(timestamp_sec)
-
-        # 計算對應的幀索引
-        frame_idx = int(timestamp_sec * self.video_fps)
-        self.current_frame_idx = frame_idx
-
-        # 顯示該幀
+        frame_idx = self._frame_at_time(timestamp_sec)
+        # Commit the slider/readout only after the target frame was decoded.
         self._show_frame(frame_idx)
 
     def _get_frame_at_timestamp(self, timestamp_sec: float) -> Optional[np.ndarray]:
@@ -1006,20 +1121,7 @@ class VideoAnnotator(tk.Frame):
         if not self.video_cap or not self.video_cap.isOpened():
             return None
 
-        # 計算對應的幀位置
-        frame_pos = int(timestamp_sec * self.video_fps)
-
-        # 限制在有效範圍內
-        frame_pos = max(0, min(frame_pos, self.video_total_frames - 1))
-
-        # 設定影片位置 - 這就是實現"跳轉"的關鍵！
-        self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
-
-        # 讀取幀
-        ret, frame = self.video_cap.read()
-        if ret:
-            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        return None
+        return self._get_frame_by_index(self._frame_at_time(timestamp_sec))
 
     def _get_frame_by_index(self, frame_idx: int) -> Optional[np.ndarray]:
         """直接根據幀索引取得 RGB 幀（不依賴硬碟快取）
@@ -1033,17 +1135,29 @@ class VideoAnnotator(tk.Frame):
             return None
         
         self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = self.video_cap.read()
+        try:
+            ret, frame = self.video_cap.read()
+        except VideoIndexError as error:
+            self._stop_playback()
+            self._last_video_frame = None
+            self.lbl_video.config(image='', text='影格定位失敗，請查看下方狀態訊息。')
+            self._update_status_bar(str(error))
+            return None
         if ret:
             return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return None
 
     def _get_frame_pil_by_index(self, frame_idx: int) -> Optional[Image.Image]:
         """根據幀索引取得 PIL Image（不依賴硬碟快取）"""
-        frame_rgb = self._get_frame_by_index(frame_idx)
-        if frame_rgb is not None:
-            return Image.fromarray(frame_rgb)
-        return None
+        if not self.video_cap or not self.video_cap.isOpened():
+            return None
+        position = self.video_cap.get(cv2.CAP_PROP_POS_FRAMES)
+        try:
+            frame_rgb = self._get_frame_by_index(frame_idx)
+            return Image.fromarray(frame_rgb) if frame_rgb is not None else None
+        finally:
+            # Auxiliary ROI previews must not move the playback decoder's cursor.
+            self.video_cap.set(cv2.CAP_PROP_POS_FRAMES, position)
 
     def _show_frame(self, frame_idx: int):
         """
@@ -1056,20 +1170,21 @@ class VideoAnnotator(tk.Frame):
             return
 
         # 從 video player 獲取幀
-        frame_rgb = self._get_frame_at_timestamp(frame_idx / self.video_fps)
+        frame_rgb = self._get_frame_by_index(frame_idx)
         if frame_rgb is None:
             print(f"錯誤：無法為幀 {frame_idx} 獲取圖像。")
-            self.lbl_video.config(image=None) # 清空畫面
+            self._last_video_frame = None
+            self.lbl_video.config(image='') # Clear rather than retain a stale image.
             return
 
         frame_pil = Image.fromarray(frame_rgb)
 
         # 計算對應的時間戳
-        timestamp_sec = frame_idx / self.video_fps
+        timestamp_sec = self._frame_time(frame_idx)
 
         # --- 更新 Slider/Label 顯示 (提前更新，確保UI同步) ---
         self.slider_var.set(timestamp_sec)
-        self.lbl_frame_num.config(text=f"時間: {timestamp_sec:.2f}s / {self.video_duration:.2f}s (幀: {frame_idx})")
+        self._update_frame_readout(frame_idx, timestamp_sec, animate=not self.video_playing)
         self.current_frame_idx = frame_idx
         self.goto_var.set(frame_idx)
         
@@ -1081,62 +1196,8 @@ class VideoAnnotator(tk.Frame):
         if self.surgery_stage_mode and self.current_surgery_stage_region:
             self._perform_cache_comparison(frame_pil)
         
-        display_image = None
+        self._display_frame_from_image(frame_pil)
 
-        # === 預設模式: 顯示完整幀與ROI框 ===
-        disp_pil = frame_pil.resize((self.VID_W, self.VID_H), Image.Resampling.BILINEAR)
-
-        # 根據當前模式繪製相應的ROI框
-        if self.original_vid_w > 0 and self.original_vid_h > 0:
-            draw = ImageDraw.Draw(disp_pil)
-            scale_x = self.VID_W / self.original_vid_w
-            scale_y = self.VID_H / self.original_vid_h
-            
-            if self.surgery_stage_mode:
-                # 手術階段ROI模式：顯示所有手術階段ROI框
-                for region_name, coords in self.surgery_stage_roi_dict.items():
-                    if coords and len(coords) >= 4:
-                        x1, y1, x2, y2 = coords
-                        # 當前選中的區域用藍色框，其他用綠色框
-                        color = "blue" if region_name == self.current_surgery_stage_region else "green"
-                        width = 3 if region_name == self.current_surgery_stage_region else 2
-                        draw.rectangle(
-                            [x1*scale_x, y1*scale_y, x2*scale_x, y2*scale_y],
-                            outline=color, width=width
-                        )
-                        # 添加區域名稱標籤
-                        text_x = x1*scale_x + 5
-                        text_y = y1*scale_y - 15 if y1*scale_y > 15 else y1*scale_y + 5
-                        draw.text((text_x, text_y), region_name, fill=color)
-            else:
-                # OCR ROI模式：顯示OCR ROI框
-                if self.roi_coords:
-                    x1, y1, x2, y2 = self.roi_coords
-                    draw.rectangle(
-                        [x1*scale_x, y1*scale_y, x2*scale_x, y2*scale_y],
-                        outline="red", width=2
-                    )
-                    # 添加OCR區域標籤
-                    if self.region_name:
-                        text_x = x1*scale_x + 5
-                        text_y = y1*scale_y - 15 if y1*scale_y > 15 else y1*scale_y + 5
-                        draw.text((text_x, text_y), f"OCR-{self.region_name}", fill="red")
-        
-        display_image = disp_pil
-
-        if display_image:
-            self.current_display_image = ImageTk.PhotoImage(display_image)
-            self.lbl_video.config(image=self.current_display_image)
-
-        # --- 控制提示圖示與焦點 ---
-        if hasattr(self, 'control_hint_frame') and self.control_hint_frame:
-            try:
-                self.control_hint_frame.lift()
-            except:
-                pass
-        self.master.focus_set()
-
-        # 更新 STAGE ROI 預覽
         self._update_stage_roi_preview(frame_pil)
         
         # 更新多軌道時間軸上的位置指示器
@@ -1234,6 +1295,9 @@ class VideoAnnotator(tk.Frame):
                     self.stage_roi_preview_label.image = prev_photo
                 except Exception as e:
                     print(f"更新上一幀 ROI 預覽時出錯: {e}")
+            elif self.stage_roi_preview_label:
+                self.stage_roi_preview_label.config(image='')
+                self.stage_roi_preview_label.image = None
 
             # 更新當前幀 ROI 預覽
             if hasattr(self, 'current_roi_preview_label') and self.current_roi_preview_label:
@@ -1306,17 +1370,16 @@ class VideoAnnotator(tk.Frame):
 
     def _on_slider_move(self, value):
         """
-        Scale 滑動期間 (實時) 呼叫。
-        只更新右側時間顯示，不去真的載入幀，避免拖曳卡頓。
+        Scale 拖曳期間只顯示目標預覽，已提交的幀號/時間仍對應畫面。
         `value` 由 Tk 傳入，字串或浮點皆有可能。
         """
         try:
-            timestamp_sec = float(value)
+            target = float(value)
         except (ValueError, TypeError):
             return
         if self.video_duration > 0:
-            frame_idx = int(timestamp_sec * self.video_fps)
-            self.lbl_frame_num.config(text=f"時間: {timestamp_sec:.2f}s / {self.video_duration:.2f}s (幀: {frame_idx})")
+            frame_idx = self._frame_at_time(target)
+            self._update_status_bar(f'定位預覽 {format_timecode(target)}（幀 {frame_idx:,}）；放開滑桿跳轉。')
 
     def _on_slider_release(self, event=None):
         """
@@ -1326,8 +1389,10 @@ class VideoAnnotator(tk.Frame):
         self._stop_playback()
         if self.video_duration == 0:
             return
-        timestamp_sec = float(self.slider_var.get())
-        self._jump_to_timestamp(timestamp_sec)  # 會自動更新 lbl_frame_num
+        frame_idx = self._frame_at_time(self.slider_var.get())
+        self._show_frame(frame_idx)
+        if self.current_frame_idx == frame_idx and self._last_video_frame is not None:
+            self._update_status_bar(f'已定位 {format_timecode(self._frame_time(frame_idx))}（幀 {frame_idx:,}）')
         # slider 更新後，標籤不需要重繪，位置與時間軸一致
 
     def _configure_treeview_columns(self, mode: str, region: str = None):
@@ -1404,6 +1469,21 @@ class VideoAnnotator(tk.Frame):
             # OCR標註模式
             self._configure_treeview_columns("ocr")
             self._load_ocr_annotations_to_treeview()
+        self._update_event_summary()
+
+    def _update_event_summary(self):
+        items = self.tree.get_children()
+        self.lbl_event_count.config(text=f'{len(items):,} 筆')
+        for index, item in enumerate(items):
+            tags = [tag for tag in self.tree.item(item, 'tags') if tag != 'review_alternate']
+            if index % 2:
+                tags.append('review_alternate')
+            self.tree.item(item, tags=tags)
+        if items:
+            self.empty_events_label.place_forget()
+        else:
+            self.empty_events_label.config(text='此區域尚無分析事件' if self.video_path else '載入影片後顯示分析事件')
+            self.empty_events_label.place(relx=.5, rely=.45, anchor='center')
 
     def _load_ocr_annotations_to_treeview(self):
         """載入OCR標註到表格"""
@@ -1718,7 +1798,7 @@ class VideoAnnotator(tk.Frame):
             print(f"可用區域: {list(regions_data.keys())}")
             return
         
-        segments = regions_data[current_region]
+        segments = region_segments(self.stage_analysis, current_region)
         print(f"載入 {current_region} 區域的 {len(segments)} 個段落")
         
         if not segments:
@@ -1726,7 +1806,7 @@ class VideoAnnotator(tk.Frame):
             return
         
         # 取得PEDAL區域的數據，用於識別STAGE開始
-        pedal_segments = regions_data.get('PEDAL', [])
+        pedal_segments = region_segments(self.stage_analysis, 'PEDAL')
         
         for i, segment in enumerate(segments):
             start_frame = segment.get('start_frame', 0)
@@ -1783,6 +1863,26 @@ class VideoAnnotator(tk.Frame):
         
         print(f"表格載入完成，共添加 {len(segments)} 個項目")
 
+    def _clear_programmatic_tree_selection(self, event=None):
+        self._tree_selection_generation += 1
+        self._programmatic_tree_selection = None
+
+    def _finish_tree_selection(self, event):
+        if event.time == self._tree_selection_generation:
+            self._programmatic_tree_selection = None
+
+    def _select_tree_item_without_seeking(self, item):
+        if self.tree.selection() == (item,):
+            return
+        self._tree_selection_generation += 1
+        self._programmatic_tree_selection = (item,)
+        self.tree.selection_set(item)
+        self.tree.focus(item)
+        # TreeviewSelect is queued, so rebinding or an immediate bool reset is too
+        # early. A tail event retires only this generation after its selection event.
+        self.tree.event_generate('<<ReviewSelectionSettled>>', when='tail',
+                                 time=self._tree_selection_generation)
+
     def _sync_treeview_selection_to_frame(self, target_frame: int, force: bool = False):
         """將表格選擇同步到指定幀"""
         if self._sync_in_progress and not force:
@@ -1822,19 +1922,9 @@ class VideoAnnotator(tk.Frame):
                     continue
             
             if best_item:
-                # [修復] 臨時解綁事件，避免觸發 _on_treeview_select 導致重複跳轉
-                self.tree.unbind('<<TreeviewSelect>>')
-                try:
-                    # 選中項目
-                    self.tree.selection_set(best_item)
-                    self.tree.focus(best_item)
-                    
-                    # 滾動到中間
-                    self._center_treeview_item(best_item)
-                    print(f"同步完成：選中項目 {best_item}")
-                finally:
-                    # 重新綁定事件
-                    self.tree.bind('<<TreeviewSelect>>', self._on_treeview_select)
+                self._select_tree_item_without_seeking(best_item)
+                self._center_treeview_item(best_item)
+                print(f"同步完成：選中項目 {best_item}")
             else:
                 print("沒有找到匹配的表格項目")
                 
@@ -1872,10 +1962,18 @@ class VideoAnnotator(tk.Frame):
     def _on_goto_frame(self, event=None):
         self._stop_playback()
         try:
-            idx = int(self.goto_var.get())
-        except (ValueError, TypeError):
-            return
+            idx = int(self.goto_entry.get().strip())
+        except (ValueError, TypeError, TclError):
+            self.goto_entry.state(['invalid'])
+            self._update_status_bar('請輸入有效的整數幀號。')
+            return 'break'
+        if not 0 <= idx < self.video_total_frames:
+            self.goto_entry.state(['invalid'])
+            self._update_status_bar(f'可跳轉的幀號範圍：0–{max(0, self.video_total_frames-1):,}')
+            return 'break'
+        self.goto_entry.state(['!invalid'])
         self._show_frame(idx)
+        return 'break'
 
     def _update_status_bar(self, message: str):
         """更新狀態列訊息"""
@@ -1885,7 +1983,16 @@ class VideoAnnotator(tk.Frame):
 
     def _clear_previous_video_data(self):
         """清除所有與當前影片相關的數據和UI狀態"""
+        self._clear_programmatic_tree_selection()
+        self._reference_checker = None
+        for label in (self.stage_roi_preview_label, self.current_roi_preview_label):
+            label.config(image='')
+            label.image = None
+        self.roi_diff_label.config(text='Diff: —')
+        self.goto_entry.state(['!invalid'])
+        self._last_video_frame = None
         self._stop_playback()
+        self.lbl_video.config(image='', text='手術影像工作區\n\n載入影片，檢視 OCR 數值與手術階段')
         self.playback_active = False
         self.video_playing = False  # 新增 video player 狀態清理
         if hasattr(self, 'after_id') and self.after_id:
@@ -1915,9 +2022,14 @@ class VideoAnnotator(tk.Frame):
             self.video_cap.release()
         self.video_cap = None
         self.video_path = None
+        self.lbl_video_meta.config(text='等比例檢視  /  ROI 疊圖')
         self.video_fps = 30.0
         self.video_total_frames = 0
         self.video_duration = 0.0
+        self._readout_frame = None
+        self._readout_feedback.stop()
+        self.lbl_frame_num.config(text='FRAME  —')
+        self.lbl_timecode.config(text='00:00:00.00 / 00:00:00.00')
 
         # 保持向後兼容的屬性
         self.video_file_path = None
@@ -1953,6 +2065,7 @@ class VideoAnnotator(tk.Frame):
         # 清除畫布
         if hasattr(self, 'canvas'):
             self.canvas.delete("all")
+        self._update_event_summary()
 
     # 新增處理 TreeView 選擇事件的方法
     def _on_treeview_select(self, event=None):
@@ -1960,7 +2073,9 @@ class VideoAnnotator(tk.Frame):
         selected_items = self.tree.selection()
         if not selected_items:
             return
-        
+        if selected_items == self._programmatic_tree_selection:
+            return
+        self._clear_programmatic_tree_selection()
         selected_id = selected_items[0]
         
         try:
@@ -2022,7 +2137,8 @@ class VideoAnnotator(tk.Frame):
             # 創建編輯對話框
             edit_dialog = tk.Toplevel(self)
             edit_dialog.title(f"編輯幀 {frame_idx} 的標註")
-            edit_dialog.geometry("400x150")  # 稍微縮小高度，因為通常只需要輸入簡短內容
+            edit_dialog.geometry("440x210")
+            edit_dialog.minsize(420, 190)
             edit_dialog.resizable(True, True)
             
             # 確保對話框在主窗口之上
@@ -2035,7 +2151,7 @@ class VideoAnnotator(tk.Frame):
             
             # 使用 Entry 而不是 Text（因為我們主要處理單行數字）
             txt_var = tk.StringVar(value=current_response)
-            txt_edit = ttk.Entry(edit_dialog, textvariable=txt_var, width=20, font=("Arial", 12))
+            txt_edit = ttk.Entry(edit_dialog, textvariable=txt_var, width=20, font=('Consolas', 14))
             txt_edit.pack(fill=tk.X, expand=True, padx=10, pady=5)
             
             # 添加按鈕框架
@@ -2050,7 +2166,7 @@ class VideoAnnotator(tk.Frame):
                     
                     # 更新 TreeView
                     try:
-                        self.tree.item(selected_id, values=(frame_idx, new_text))
+                        self.tree.set(selected_id, 'content', new_text)
                         print(f"成功更新 TreeView 項目")
                     except Exception as e:
                         print(f"更新 TreeView 項目失敗: {e}")
@@ -2090,30 +2206,32 @@ class VideoAnnotator(tk.Frame):
                     edit_dialog.destroy()
             
             # 綁定按鈕
-            btn_save = tk.Button(btn_frame, text="保存", command=save_edit)
+            btn_save = ui_button(btn_frame, "保存", save_edit, primary=True)
             btn_save.pack(side=tk.RIGHT, padx=5)
             
             # 取消按鈕
-            btn_cancel = tk.Button(btn_frame, text="取消", command=edit_dialog.destroy)
+            btn_cancel = ui_button(btn_frame, "取消", edit_dialog.destroy)
             btn_cancel.pack(side=tk.RIGHT, padx=5)
             
             # 綁定 Enter 鍵到保存動作
             txt_edit.bind("<Return>", lambda e: save_edit())
+            edit_dialog.bind('<Escape>', lambda e: (edit_dialog.destroy(), self.tree.focus_set(), 'break')[-1])
             
             # 設置焦點
             txt_edit.focus_set()
             # 游標定位到文字末尾
             txt_edit.icursor(tk.END)
+            txt_edit.selection_range(0, 'end')
             
             # 將對話框定位到適當位置
-            if event and hasattr(event, 'x_root') and hasattr(event, 'y_root'):
+            if event and getattr(event, 'type', None) in (tk.EventType.ButtonPress, tk.EventType.ButtonRelease):
                 # 如果有滑鼠事件，定位到滑鼠位置
                 x = event.x_root
                 y = event.y_root
                 
                 # 確保不會超出螢幕
-                dialog_width = 400
-                dialog_height = 150
+                dialog_width = 440
+                dialog_height = 210
                 screen_width = edit_dialog.winfo_screenwidth()
                 screen_height = edit_dialog.winfo_screenheight()
                 
@@ -2144,6 +2262,10 @@ class VideoAnnotator(tk.Frame):
                     tree_x = self.tree.winfo_rootx() + self.tree.winfo_width() // 2
                     tree_y = self.tree.winfo_rooty() + self.tree.winfo_height() // 2
                     edit_dialog.geometry(f"+{tree_x-200}+{tree_y-75}")
+            edit_dialog.update_idletasks()
+            x = max(0, min(edit_dialog.winfo_x(), edit_dialog.winfo_screenwidth()-edit_dialog.winfo_width()))
+            y = max(0, min(edit_dialog.winfo_y(), edit_dialog.winfo_screenheight()-edit_dialog.winfo_height()))
+            edit_dialog.geometry(f'+{x}+{y}')
         
         except Exception as e:
             print(f"創建編輯對話框時發生未知錯誤: {e}")
@@ -2192,6 +2314,7 @@ class VideoAnnotator(tk.Frame):
                 except (ValueError, KeyError, TclError) as e:
                     print(f"刪除標註時出錯: {e}")
             self._update_status_bar("已刪除所選標註")
+            self._update_event_summary()
 
     def _show_stage_setting_details(self):
         """顯示階段設定值變化的詳細資訊"""
@@ -2334,8 +2457,7 @@ class VideoAnnotator(tk.Frame):
             # 如果有資料，預設選中第一項
             if self.tree.get_children():
                 first_item = self.tree.get_children()[0]
-                self.tree.selection_set(first_item)
-                self.tree.focus(first_item)
+                self._select_tree_item_without_seeking(first_item)
                 # 但不自動跳轉，讓用戶可以用鍵盤導航
                 print(f"已選中第一個項目")
             
@@ -2411,6 +2533,7 @@ class VideoAnnotator(tk.Frame):
                 roi_dict=self.roi_dict,
                 roi_header_dict=roi_header_dict if roi_header_dict else None,
                 video_name=video_name,
+                machine_id=getattr(self, 'analysis_machine_id', None),
                 path=roi_file
             )
             
@@ -2430,15 +2553,22 @@ class VideoAnnotator(tk.Frame):
         
         # 獲取當前視頻名稱（如果有）
         video_name = getattr(self, 'video_title', None)
+        self.analysis_machine_id = None
         
         try:
             if roi_file.exists():
+                analysis_dir = resolve_video_analysis_dir(self.video_path) if self.video_path else Path('__no_video__')
+                self.analysis_machine_id, self.analysis_machine_source = analysis_machine(
+                    analysis_dir, video_name, roi_file)
+                self.master.title(f"SurgeryOCR — 機型 {self.analysis_machine_id}（{self.analysis_machine_source}）")
+                self.pattern_name_map = load_pattern_name_mapping(machine_config(
+                    Path(resource_path('config')), 'pattern_name_mapping.json', self.analysis_machine_id))
                 # 使用統一的配置加載函數，自動處理新舊格式並根據視頻選擇對應機型
-                self.roi_dict = load_roi_config(roi_file, video_name=video_name)
+                self.roi_dict = load_roi_config(roi_file, video_name=video_name, machine_id=self.analysis_machine_id)
                 
                 # 同時載入header配置（如果存在）
                 try:
-                    self.roi_header_dict = load_roi_header_config(roi_file, video_name=video_name)
+                    self.roi_header_dict = load_roi_header_config(roi_file, video_name=video_name, machine_id=self.analysis_machine_id)
                     if self.roi_header_dict:
                         print(f"已載入 ROI header 設定: {self.roi_header_dict}")
                 except Exception as e:
@@ -2458,11 +2588,10 @@ class VideoAnnotator(tk.Frame):
                 self.roi_header_dict = {}
         except Exception as e:
             print(f"載入全域 ROI 設定失敗: {e}")
-            # 載入失敗時使用預設配置
-            self.roi_dict = {
-                "region2": [1640, 445, 1836, 525]
-            }
+            # Do not draw plausible but incorrect rectangles after an evidence/config error.
+            self.roi_dict = {}
             self.roi_header_dict = {}
+            self.master.title('SurgeryOCR — ROI 設定載入失敗')
         
         # 更新 UI（如果已建立）
         if hasattr(self, 'region_combobox'):
@@ -2536,13 +2665,15 @@ class VideoAnnotator(tk.Frame):
         
         print(f"OCR ROI UI已更新，當前區域: {self.region_name}")
 
-    def _save_annotations(self, region_name: str):
+    def _save_annotations(self, region_name: str, *, notify=True):
         """儲存標註結果 - 手動儲存時處理當前分析結果"""
         
         # 儲存正式的標註內容
         if not self.annotations:
             print("無標註內容需要儲存。")
-            messagebox.showinfo("提示", "沒有標註內容需要儲存")
+            self._update_status_bar('沒有需要儲存的標註內容。')
+            if notify:
+                messagebox.showinfo("提示", "沒有標註內容需要儲存")
             return
         
         try:
@@ -2565,7 +2696,8 @@ class VideoAnnotator(tk.Frame):
                     f.write(json.dumps(record, ensure_ascii=False) + '\n')
             
             print(f"✅ 標註已儲存至: {jsonl_path}")
-            messagebox.showinfo("儲存成功", f"標註已儲存至:\n{jsonl_path.name}")
+            if notify:
+                messagebox.showinfo("儲存成功", f"標註已儲存至:\n{jsonl_path.name}")
             self._update_status_bar(f"標註已儲存: {jsonl_path.name}")
             
         except Exception as e:
@@ -2709,6 +2841,7 @@ class VideoAnnotator(tk.Frame):
     def _on_closing(self):
         """應用程式關閉時的處理 - 不自動儲存當前分析結果"""
         print("關閉應用程式...")
+        self._readout_feedback.stop()
         
         # 只儲存已確認的標註內容和變化幀資料，不包含當前分析快取
         if self.video_file_path and self.region_name:
@@ -2767,9 +2900,9 @@ class VideoAnnotator(tk.Frame):
 
             timeline_canvas = tk.Canvas(self.timeline_tracks_frame,
                                       height=self.track_height,
-                                      bg="#fafafa",
+                                      bg=UI["track"],
                                       highlightthickness=1, # Add border for visual separation
-                                      highlightbackground="#cccccc")
+                                      highlightbackground=UI["border"])
             
             timeline_canvas.pack(fill="x", expand=True, pady=(0, self.track_spacing), padx=0)
 
@@ -2826,7 +2959,7 @@ class VideoAnnotator(tk.Frame):
 
                 region_color = self.roi_color_map.get(region, "#666666")
                 name_label = tk.Label(label_container, text=region, 
-                                    bg="#f0f0f0", fg=region_color, 
+                                    bg=UI["panel"], fg=region_color,
                                     font=("Arial", 9, "bold"),
                                     anchor="w", padx=5, relief="solid", bd=1)
                 name_label.pack(fill="both", expand=True, pady=(0, self.track_spacing))
@@ -3041,7 +3174,7 @@ class VideoAnnotator(tk.Frame):
                 canvas_width = canvas.winfo_width()
                 canvas_height = canvas.winfo_height()
                 if canvas_width > 1:
-                    canvas.create_rectangle(0, 0, canvas_width, canvas_height, fill="#f0f0f0", outline="")
+                    canvas.create_rectangle(0, 0, canvas_width, canvas_height, fill=UI['track'], outline="")
                 return
 
             canvas = track_data['canvas']
@@ -3052,7 +3185,7 @@ class VideoAnnotator(tk.Frame):
             canvas_height = canvas.winfo_height()
 
             canvas.delete("all")
-            canvas.create_rectangle(0, 0, canvas_width, canvas_height, fill="#f0f0f0", outline="")
+            canvas.create_rectangle(0, 0, canvas_width, canvas_height, fill=UI['track'], outline="")
             
             if canvas_width <= 1 or not segments:
                 return
@@ -3103,8 +3236,10 @@ class VideoAnnotator(tk.Frame):
                     continue
                 
                 # 計算精確的像素位置，確保end_frame被包含
-                x_start = (s / total_frames) * canvas_width
-                x_end = ((e + 1) / total_frames) * canvas_width
+                extent = max(1, canvas_width-1)
+                duration = self.video_duration or 1
+                x_start = (self._frame_time(s) / duration) * extent
+                x_end = (self._frame_time(e+1) / duration) * extent
                 
                 # 檢查是否與前一個段落連續
                 is_continuous = False
@@ -3247,7 +3382,7 @@ class VideoAnnotator(tk.Frame):
                 return
 
             total_frames = max(1, self.total_frames - 1)
-            indicator_x = int((current_frame / total_frames) * (canvas_width - 1)) if total_frames > 0 else 0
+            indicator_x = int((self._frame_time(current_frame) / self.video_duration) * (canvas_width - 1)) if self.video_duration > 0 else 0
             indicator_x = max(0, min(indicator_x, canvas_width - 1))
 
             canvas.create_line(
@@ -3301,7 +3436,7 @@ class VideoAnnotator(tk.Frame):
             s, e = meta["start"], meta["end"]
             dur_frames = e - s + 1
             fps = self.fps if getattr(self, 'fps', 0) else 30.0
-            dur_sec = dur_frames / fps
+            dur_sec = self._frame_time(e+1)-self._frame_time(s)
             
             text = (f"{meta['region']} Pattern #{meta['pattern']}\n"
                    f"幀範圍: {s} → {e} ({dur_frames} 幀)\n"
@@ -3332,12 +3467,18 @@ class VideoAnnotator(tk.Frame):
                 meta = meta_dict.get(item_id)
                 if meta:
                     frame_to_show = int(meta["start"])
-                    timestamp_sec = frame_to_show / self.video_fps
-                    self._jump_to_timestamp(timestamp_sec)
+                    timestamp_sec = self._frame_time(frame_to_show)
+                    self.mode_notebook.select(self.surgery_mode_frame)
+                    self.current_surgery_stage_region = region_name
+                    self.surgery_stage_combobox.set(region_name)
+                    if self.surgery_stage_mode:
+                        self._refresh_treeview()
+                    self._show_frame(frame_to_show)
                     print(f"點擊軌道 {region_name} 標籤 #{meta['pattern']}，跳轉到時間 {timestamp_sec:.2f}s (幀 {frame_to_show})")
 
                     # 延遲同步表格選擇，確保幀已經更新
-                    self.master.after(50, lambda: self._sync_treeview_selection_to_frame(frame_to_show, force=True))
+                    if self.surgery_stage_mode:
+                        self._sync_treeview_selection_to_frame(frame_to_show, force=True)
                     break
             
         except Exception as e:
@@ -3479,7 +3620,8 @@ class VideoAnnotator(tk.Frame):
 
     def _save_surgery_stage_roi_config(self):
         """儲存手術階段ROI設定到檔案"""
-        roi_file = get_surgery_stage_roi_config_path()
+        roi_file = machine_config(Path(resource_path('config')), 'surgery_stage_rois.json',
+                                  getattr(self, 'analysis_machine_id', None))
         if not roi_file:
             return
         
@@ -3497,7 +3639,8 @@ class VideoAnnotator(tk.Frame):
 
     def _load_surgery_stage_roi_config(self):
         """載入手術階段ROI設定"""
-        roi_file = get_surgery_stage_roi_config_path()
+        roi_file = machine_config(Path(resource_path('config')), 'surgery_stage_rois.json',
+                                  getattr(self, 'analysis_machine_id', None))
         
         try:
             if roi_file.exists():
@@ -3598,137 +3741,37 @@ class VideoAnnotator(tk.Frame):
             self.surgery_stage_x2_var.set(x2)
             self.surgery_stage_y2_var.set(y2)
 
-    def _load_roi_cache(self, region_name: str) -> Optional[np.ndarray]:
-        """載入指定區域的最新快取圖像"""
-        try:
-            cache_dir = Path("data/roi_img_caches/machine_1_2") / region_name
-            if not cache_dir.exists():
-                return None
-                
-            # 找到所有NPY快取檔案
-            npy_files = list(cache_dir.glob("*.npy"))
-            if not npy_files:
-                return None
-                
-            # 按編號排序，取最新的（最大編號）
-            def get_file_number(file_path):
-                try:
-                    return int(file_path.stem)
-                except ValueError:
-                    return 0
-                    
-            latest_npy = max(npy_files, key=get_file_number)
-            cache_number = get_file_number(latest_npy)
-            
-            # 載入快取數組
-            cache_array = np.load(latest_npy)
-            
-            # 更新內存快取
-            self.roi_image_cache[region_name] = cache_array.copy()
-            
-            print(f"已載入 {region_name} 區域快取: #{cache_number} ({latest_npy.name})")
-            return cache_array
-            
-        except Exception as e:
-            print(f"載入 {region_name} 區域快取時發生錯誤: {e}")
-            return None
-
-    def _calculate_roi_diff_rmse(self, img1: np.ndarray, img2: np.ndarray) -> float:
-        """計算兩張ROI圖像的RMSE差異"""
-        try:
-            # 確保兩張圖像尺寸一致
-            if img1.shape != img2.shape:
-                return float('inf')  # 尺寸不一致，返回無限大差異
-            
-            # 轉換為float32進行計算
-            img1_f = img1.astype(np.float32)
-            img2_f = img2.astype(np.float32)
-            
-            # 計算均方根誤差 (RMSE)
-            mse = np.mean((img1_f - img2_f) ** 2)
-            rmse = np.sqrt(mse)
-            
-            return float(rmse)
-            
-        except Exception as e:
-            print(f"計算RMSE時發生錯誤: {e}")
-            return float('inf')
-
-    def _check_cache_hit(self, region_name: str, current_roi_image: Image.Image) -> tuple[bool, float]:
-        """檢查當前ROI圖像是否與快取匹配"""
-        try:
-            # 先嘗試從內存快取獲取
-            if region_name not in self.roi_image_cache:
-                # 如果內存中沒有，嘗試從檔案載入
-                cache_array = self._load_roi_cache(region_name)
-                if cache_array is None:
-                    return False, float('inf')
-            else:
-                cache_array = self.roi_image_cache[region_name]
-            
-            # 處理當前ROI圖像
-            if region_name == "PEDAL":
-                # PEDAL區域使用原圖
-                current_array = np.array(current_roi_image)
-            else:
-                # 其他區域進行二值化處理
-                bin_np = self._apply_core_binarization(current_roi_image)
-                processed_image = Image.fromarray(bin_np) if bin_np is not None else None
-                if processed_image is None:
-                    return False, float('inf')
-                
-                if isinstance(processed_image, np.ndarray):
-                    current_array = processed_image
-                else:
-                    current_array = np.array(processed_image)
-            
-            # 計算RMSE差異
-            rmse = self._calculate_roi_diff_rmse(cache_array, current_array)
-            
-            # 判斷是否為cache hit
-            is_hit = rmse < self.cache_hit_threshold
-            
-            return is_hit, rmse
-            
-        except Exception as e:
-            print(f"檢查cache hit時發生錯誤: {e}")
-            return False, float('inf')
-
     def _perform_cache_comparison(self, full_frame_image: Image.Image):
-        """在切換frame時執行快取比對"""
-        try:
-            region_name = self.current_surgery_stage_region
-            if region_name not in self.surgery_stage_roi_dict:
-                return
-                
-            # 獲取ROI座標並裁剪圖像
-            coords = self.surgery_stage_roi_dict[region_name]
-            x1, y1, x2, y2 = coords
-            roi_image = full_frame_image.crop((x1, y1, x2, y2))
-            
-            # 檢查快取匹配
-            is_hit, rmse = self._check_cache_hit(region_name, roi_image)
-            
-            # 更新狀態欄顯示比對結果
-            if is_hit:
-                status_msg = f"🎯 Cache HIT! {region_name} RMSE: {rmse:.2f} (< {self.cache_hit_threshold})"
-                print(f"✅ {status_msg}")
-            else:
-                if rmse == float('inf'):
-                    status_msg = f"❌ No cache for {region_name}"
-                else:
-                    status_msg = f"❌ Cache MISS! {region_name} RMSE: {rmse:.2f} (>= {self.cache_hit_threshold})"
-                print(f"⚠️ {status_msg}")
-            
-            self._update_status_bar(status_msg)
-            
-        except Exception as e:
-            print(f"執行快取比對時發生錯誤: {e}")
-            import traceback
-            traceback.print_exc()
+        """Compare only with this frame's recorded template, never the largest ID."""
+        region = self.current_surgery_stage_region
+        segment = recorded_segment(self.stage_analysis, region, self.current_frame_idx)
+        if segment is None:
+            message = f'{region} | 此幀沒有此區域分析紀錄'
+        else:
+            pattern = segment.get('pattern')
+            name = segment.get('pattern_name') or self.pattern_name_map.get(region, {}).get(str(pattern), str(pattern))
+            message = f'{region} | {name}（分析紀錄）'
+            if not self.video_playing:
+                try:
+                    if self._reference_checker is None:
+                        cache_root = Path('data/roi_img_caches')
+                        if not cache_root.is_dir():
+                            cache_root = Path(resource_path('data/roi_img_caches'))
+                        self._reference_checker = ReferenceChecker(Path(resource_path('config')), cache_root)
+                    roi = full_frame_image.crop(tuple(self.surgery_stage_roi_dict[region]))
+                    result = self._reference_checker.inspect(roi, self.analysis_machine_id, region, pattern)
+                    if result['state'] == 'match':
+                        message += f" | 參照一致 ({result['rmse']:.2f})"
+                    elif result['state'] == 'different':
+                        message += f" | 與參照圖不同 ({result['rmse']:.2f})"
+                    else:
+                        message += ' | 未提供相容參照圖，未比對'
+                except (OSError, ValueError, KeyError, TypeError):
+                    message += ' | 參照圖無法讀取，未比對'
+        if self.status_var.get() != message:
+            self._update_status_bar(message)
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = VideoAnnotator(root)
     root.mainloop()
-    

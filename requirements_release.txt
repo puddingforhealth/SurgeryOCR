@@ -1,0 +1,5 @@
+numpy
+Pillow
+av==17.0.1
+# OpenCV is pinned: 5.0 decodes video to different pixels and changes OCR readings.
+opencv-python-headless==4.11.0.86

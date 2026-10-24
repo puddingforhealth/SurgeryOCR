@@ -103,7 +103,37 @@ This is the standard operating procedure for analyzing surgery videos. These com
     beside the button shows the folder in use. Setting `ANALYSIS_DATA_ROOT=runs/cloud` before
     launching does the same. Annotations you save go to the folder in use.
 
+    The video automatically fits the available viewing area while keeping its aspect ratio:
+    either its width or height fills the area, with no cropping or stretching. Resize or
+    maximize the window to enlarge it. ROI overlays scale with the image, and resizing a
+    paused video keeps the same frame.
+
+    The dark workstation layout groups video/file actions, OCR or surgical-phase selection,
+    ROI frame comparisons, the event table, and playback/timeline controls. The status footer
+    shows current actions and keyboard shortcuts: **Space** plays/pauses, **Left/Right** step
+    frames, and **Up/Down** move between events. Both analysis modes and annotation files keep
+    their existing behavior. The window supports sizes from 1050×720 upward.
+    See [workstation layout and verification](docs/viewer-workstation.md) for details.
+    **F1** opens the complete shortcut reference. **Ctrl+O** opens a video, **Ctrl+S** saves
+    OCR annotations, **Ctrl+L** focuses the frame jump field, **Alt+1/2** switches modes,
+    and **Alt+Up/Down** switches ROI regions. Manual frame/time changes briefly highlight
+    the readouts; this feedback can be disabled in the F1 panel.
+    Event counts, alternating rows, and source resolution/FPS help orient the review.
+    Hover over filenames or result paths to see them in full. Buttons accept **Enter**;
+    annotation dialogs accept **Esc** to cancel. Invalid frame jumps show inline guidance,
+    and shortcut saves report success in the status footer.
+    Frame navigation and displayed times use the video's actual presentation timestamps;
+    the slider and both timeline tracks share that time axis. See
+    [frame/time synchronization](docs/viewer-timing.md) for VFR verification details.
+
 ## Running on a Cloud Machine
+
+For Google Drive inputs, see [Drive batch analysis](docs/drive-batch.md): download one video at a time
+directly on the GPU machine while analyzing the previous one in RAM mode, then verify and collect
+each result locally with the original folder hierarchy. Temporary inputs are bounded and successful
+copies are removed only after local collection is acknowledged.
+For local review, the same workflow can download videos serially with a bandwidth limit and
+place each MP4 beside its matching analysis folder on a data drive; the GUI finds those results automatically.
 
 ### Fetching results through `rcs`
 
