@@ -53,8 +53,6 @@ python extract_roi_images.py \
 
 from __future__ import annotations
 import argparse
-import json
-import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -70,7 +68,8 @@ from utils.get_paths import resolve_video_analysis_dir
 
 # 添加HDF5支持
 try:
-    import h5py
+    import h5py  # noqa: F401 - probe the optional native library
+
     HDF5_AVAILABLE = True
 except ImportError:
     HDF5_AVAILABLE = False
@@ -121,6 +120,7 @@ def iterate_roi_binary_from_cache(
         if rois_data:
             yield frame_idx, rois_data
 
+
 def process_video(
     video_path: Path,
     roi_items: List[Tuple[str, Tuple[int, int, int, int]]],
@@ -138,9 +138,9 @@ def process_video(
             output_dir = Path("data")
         else:
             output_dir = resolve_video_analysis_dir(video_path)
-    
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     print(f"處理模式: {mode.upper()}")
 
     # 使用 frame_cache 來源：逐幀讀取 frame_cache，裁切 ROI（統一來源，不再解碼影片）
@@ -154,7 +154,7 @@ def process_video(
     if not force:
         # 精確判斷：所有區域的原圖（以及需要時的二值圖）數量都等於快取幀數，才整支影片跳過
         meta = get_video_meta(video_path)
-        expected_total = int(meta.get('total_frames', 0))
+        expected_total = int(meta.get("total_frames", 0))
         if expected_total <= 0:
             print(f"❌ frame_cache 為空: {cache_dir}")
             return
@@ -164,7 +164,13 @@ def process_video(
             if not out_dir.exists():
                 all_regions_complete = False
                 break
-            orig_count = len([f for f in out_dir.glob("frame_*.png") if not f.name.endswith("_binary.png")])
+            orig_count = len(
+                [
+                    f
+                    for f in out_dir.glob("frame_*.png")
+                    if not f.name.endswith("_binary.png")
+                ]
+            )
             if orig_count < expected_total:
                 all_regions_complete = False
                 break
@@ -181,7 +187,7 @@ def process_video(
     for region_name, _ in roi_items:
         (output_dir / region_name).mkdir(parents=True, exist_ok=True)
 
-    total_hint = int(get_video_meta(video_path).get('total_frames', 0)) or None
+    total_hint = int(get_video_meta(video_path).get("total_frames", 0)) or None
     pbar = tqdm(total=total_hint, desc=f"裁切ROI: {video_name}", unit="frame")
     saves_count = 0
     skips_count = 0
@@ -195,9 +201,9 @@ def process_video(
         per_region_write_plan = []  # (region_name, need_orig, need_bin)
         for region_name, _ in roi_items:
             out_orig = output_dir / region_name / f"frame_{frame_idx}.png"
-            out_bin  = output_dir / region_name / f"frame_{frame_idx}_binary.png"
+            out_bin = output_dir / region_name / f"frame_{frame_idx}_binary.png"
             need_orig = force or not out_orig.exists()
-            need_bin  = save_binary and (force or not out_bin.exists())
+            need_bin = save_binary and (force or not out_bin.exists())
             if need_orig or need_bin:
                 need_load_image = True
             per_region_write_plan.append((region_name, need_orig, need_bin))
@@ -205,7 +211,9 @@ def process_video(
         if not need_load_image:
             # 本幀所有區域檔案都已存在
             skips_count += 1
-            pbar.set_postfix({"saves": saves_count, "skips": skips_count, "errors": len(save_errors)})
+            pbar.set_postfix(
+                {"saves": saves_count, "skips": skips_count, "errors": len(save_errors)}
+            )
             pbar.update(1)
             continue
         img_bgr = frame_bgr
@@ -217,7 +225,7 @@ def process_video(
             roi_pil = Image.fromarray(cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB))
             # 按計畫逐檔判斷是否需要寫出
             out_orig = output_dir / region_name / f"frame_{frame_idx}.png"
-            out_bin  = output_dir / region_name / f"frame_{frame_idx}_binary.png"
+            out_bin = output_dir / region_name / f"frame_{frame_idx}_binary.png"
 
             # 原圖
             if force or not out_orig.exists():
@@ -236,7 +244,9 @@ def process_video(
                 except Exception as e:
                     save_errors.append(f"{region_name}@{frame_idx} binary: {e}")
 
-        pbar.set_postfix({"saves": saves_count, "skips": skips_count, "errors": len(save_errors)})
+        pbar.set_postfix(
+            {"saves": saves_count, "skips": skips_count, "errors": len(save_errors)}
+        )
         pbar.update(1)
     pbar.close()
     print(f"✓ 完成從 frame_cache 裁切 ROI: {video_name}")
@@ -268,84 +278,79 @@ def parse_args() -> argparse.Namespace:
   
   # 指定輸出目錄
   python extract_roi_images.py --video video.mp4 --region all --output-dir ./output
-        """
+        """,
     )
-    
+
     parser.add_argument(
-        "--video", 
-        type=Path, 
-        required=True,
-        help="影片檔案路徑或影片目錄路徑"
+        "--video", type=Path, required=True, help="影片檔案路徑或影片目錄路徑"
     )
-    
+
     parser.add_argument(
-        "--region", 
+        "--region",
         default="all",
-        help="要擷取的 ROI 區域名稱 (如: region2) 或 'all' 擷取所有區域 (預設: all)"
+        help="要擷取的 ROI 區域名稱 (如: region2) 或 'all' 擷取所有區域 (預設: all)",
     )
-    
+
     parser.add_argument(
-        "--roi-config", 
-        type=Path, 
-        default=Path("config/rois.json"),
-        help="ROI 配置檔案路徑 (預設: config/rois.json)"
-    )
-    
-    parser.add_argument(
-        "--output-dir", 
+        "--roi-config",
         type=Path,
-        help="輸出目錄 (預設: PNG模式為data/影片名稱/，Tensor模式為data/preprocessed/)"
+        default=Path("config/rois.json"),
+        help="ROI 配置檔案路徑 (預設: config/rois.json)",
     )
-    
+
     parser.add_argument(
-        "--force", 
-        action="store_true",
-        help="強制重新處理，忽略已存在的檔案"
+        "--output-dir",
+        type=Path,
+        help="輸出目錄 (預設: PNG模式為data/影片名稱/，Tensor模式為data/preprocessed/)",
     )
-    
+
     parser.add_argument(
-        '--no-binary',
-        dest='save_binary',
-        action='store_false',
-        help="不要儲存二值化後的 ROI 圖片 (預設會儲存)"
+        "--force", action="store_true", help="強制重新處理，忽略已存在的檔案"
     )
-    
+
+    parser.add_argument(
+        "--no-binary",
+        dest="save_binary",
+        action="store_false",
+        help="不要儲存二值化後的 ROI 圖片 (預設會儲存)",
+    )
+
     parser.add_argument(
         "--method",
         choices=["otsu", "rule"],
         default="rule",
-        help="二值化方法 (預設: rule)"
+        help="二值化方法 (預設: rule)",
     )
-    
+
     parser.add_argument(
         "--mode",
         choices=["png", "tensor"],
         default="png",
-        help="輸出模式：png=传统PNG文件，tensor=HDF5格式 (預設: png)"
+        help="輸出模式：png=传统PNG文件，tensor=HDF5格式 (預設: png)",
     )
-    
+
     # 從 frame_cache 讀取已是唯一來源，無需額外旗標
-    
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    
+
     # 检查tensor模式的依赖
     if args.mode == "tensor" and not HDF5_AVAILABLE:
         print("❌ 错误：tensor模式需要安装h5py库")
         print("   请运行：pip install h5py")
         return
-    
+
     # 处理视频
     if args.video.is_file():
         # 处理单个视频文件
         video_name = args.video.stem
-        
+
         # 根据视频名称载入对应的ROI配置
         roi_dict = load_roi_config(path=args.roi_config, video_name=video_name)
-        
+
         # 处理区域选择
         if args.region == "all":
             roi_items = [(region, tuple(coords)) for region, coords in roi_dict.items()]
@@ -355,64 +360,71 @@ def main():
                 print(f"可用区域：{list(roi_dict.keys())}")
                 return
             roi_items = [(args.region, tuple(roi_dict[args.region]))]
-        
+
         if not roi_items:
             print("错误：没有可处理的ROI区域")
             return
-        
+
         print(f"将处理 {len(roi_items)} 个ROI区域: {[item[0] for item in roi_items]}")
-        
+
         process_video(
-            args.video, 
-            roi_items, 
+            args.video,
+            roi_items,
             output_dir=args.output_dir,
             force=args.force,
             save_binary=args.save_binary,
             mode=args.mode,
         )
-        
+
     elif args.video.is_dir():
         # 处理目录中的所有视频文件（大小寫無關的副檔名過濾）
-        allowed_exts = {'.mp4', '.avi', '.mov', '.mkv'}
+        allowed_exts = {".mp4", ".avi", ".mov", ".mkv"}
         video_files = [
-            p for p in args.video.iterdir()
+            p
+            for p in args.video.iterdir()
             if p.is_file() and p.suffix.lower() in allowed_exts
         ]
-        
+
         if not video_files:
             print(f"在目录 {args.video} 中未找到视频文件")
             return
-        
+
         print(f"找到 {len(video_files)} 个视频文件")
-        
+
         for video_file in sorted(video_files):
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"处理: {video_file.name}")
-            print(f"{'='*60}")
-            
+            print(f"{'=' * 60}")
+
             try:
                 # 为每个视频加载对应的ROI配置
                 video_name = video_file.stem
                 roi_dict = load_roi_config(path=args.roi_config, video_name=video_name)
-                
+
                 # 处理区域选择
                 if args.region == "all":
-                    roi_items = [(region, tuple(coords)) for region, coords in roi_dict.items()]
+                    roi_items = [
+                        (region, tuple(coords)) for region, coords in roi_dict.items()
+                    ]
                 else:
                     if args.region not in roi_dict:
-                        print(f"⚠ 警告：区域 '{args.region}' 在 {video_name} 的配置中不存在，跳过...")
+                        print(
+                            f"⚠ 警告：区域 '{args.region}' 在 {video_name} 的配置中不存在，跳过..."
+                        )
                         continue
                     roi_items = [(args.region, tuple(roi_dict[args.region]))]
-                
+
                 if not roi_items:
                     print("⚠ 警告：没有可处理的ROI区域，跳过...")
                     continue
-                
-                print(f"将处理 {len(roi_items)} 个ROI区域: {[item[0] for item in roi_items]}")
-                
+
+                print(
+                    f"将处理 {len(roi_items)} 个ROI区域: {[item[0] for item in roi_items]}"
+                )
+
                 process_video(
-                    video_file, 
-                    roi_items, 
+                    video_file,
+                    roi_items,
                     output_dir=args.output_dir,
                     force=args.force,
                     save_binary=args.save_binary,

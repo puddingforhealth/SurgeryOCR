@@ -3,6 +3,7 @@ import json
 from functools import lru_cache
 from typing import Dict, Any, List, Optional
 
+
 def _get_json_data(path: Path, error_msg: str) -> dict:
     if not path.exists():
         raise FileNotFoundError(error_msg)
@@ -11,17 +12,22 @@ def _get_json_data(path: Path, error_msg: str) -> dict:
     return data
 
 
-def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[str] = None, *, machine_id=None) -> dict[str, List[int]]:
+def load_roi_config(
+    path: Path = Path("config/rois.json"),
+    video_name: Optional[str] = None,
+    *,
+    machine_id=None,
+) -> dict[str, List[int]]:
     """
     加载ROI配置，支持根据视频名称自动选择对应机型的座标
-    
+
     Args:
         path: ROI配置文件路径（默认: config/rois.json）
         video_name: 视频文件名（不含扩展名），用于查找对应的机型
-    
+
     Returns:
         ROI配置字典 {region_name: [x1, y1, x2, y2]}
-    
+
     配置文件结构:
         {
           "video_machine_mapping": {
@@ -35,20 +41,20 @@ def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[
             }
           }
         }
-    
+
     使用示例:
         # 使用默认配置（机型1）
         roi_dict = load_roi_config()
-        
+
         # 根据视频自动选择机型
-        roi_dict = load_roi_config(video_name="2024-10-18周建碧OS")
+        roi_dict = load_roi_config(video_name="example-machine-1")
     """
     data = _get_json_data(path, f"ROI config not found: {path}")
-    
+
     # 确定要使用的机型编号
     selected_machine = machine_id
     machine_id = "1"  # 默认使用机型1
-    
+
     if video_name and "video_machine_mapping" in data:
         mapping = data["video_machine_mapping"]
         if video_name in mapping:
@@ -56,35 +62,42 @@ def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[
             print(f"根据视频 '{video_name}' 自动选择机型 {machine_id}")
     if selected_machine is not None:
         machine_id = str(selected_machine)
-    
+
     # 处理新格式（包含 regions 字段）
     if "regions" in data:
         regions_data = data["regions"]
         result = {}
-        
+
         for region_name, machine_configs in regions_data.items():
-            if region_name.startswith('_'):  # 跳过注释字段
+            if region_name.startswith("_"):  # 跳过注释字段
                 continue
-            
+
             if isinstance(machine_configs, dict):
                 # 新格式：{"1": [[coords], [header]], "2": [[coords], [header]]}
                 # 缺少該機型的 key 表示此區域不存在於該機型畫面，靜默跳過
                 if machine_id in machine_configs:
                     region_data = machine_configs[machine_id]
-                    if isinstance(region_data, list) and len(region_data) >= 1 and region_data[0]:
+                    if (
+                        isinstance(region_data, list)
+                        and len(region_data) >= 1
+                        and region_data[0]
+                    ):
                         # 取第一个元素作为 ROI 座标
                         result[region_name] = region_data[0]
             else:
                 print(f"警告: 区域 '{region_name}' 配置格式错误，跳过")
-        
+
         return result
-    
+
     # 兼容旧格式（直接在顶层定义 regions）
     result = {}
     for region_name, region_data in data.items():
-        if region_name.startswith('_') or region_name in ['video_machine_mapping', 'regions']:
+        if region_name.startswith("_") or region_name in [
+            "video_machine_mapping",
+            "regions",
+        ]:
             continue
-            
+
         if isinstance(region_data, list):
             if len(region_data) == 4:
                 # 旧格式: 直接座标 [x1, y1, x2, y2]
@@ -92,42 +105,48 @@ def load_roi_config(path: Path = Path("config/rois.json"), video_name: Optional[
             elif len(region_data) == 2 and isinstance(region_data[0], list):
                 # 旧格式: [[roi_coords], [header_coords]]
                 result[region_name] = region_data[0]
-    
+
     return result
 
-def load_roi_header_config(path: Path = Path("config/rois.json"), video_name: Optional[str] = None, *, machine_id=None) -> dict[str, List[int]]:
+
+def load_roi_header_config(
+    path: Path = Path("config/rois.json"),
+    video_name: Optional[str] = None,
+    *,
+    machine_id=None,
+) -> dict[str, List[int]]:
     """
     加载ROI header配置，支持根据视频名称自动选择对应机型的座标
-    
+
     Args:
         path: ROI配置文件路径（默认: config/rois.json）
         video_name: 视频文件名（不含扩展名），用于查找对应的机型
-    
+
     Returns:
         ROI header配置字典 {region_name: [x1, y1, x2, y2]}
     """
     data = _get_json_data(path, f"ROI config not found: {path}")
-    
+
     # 确定要使用的机型编号
     selected_machine = machine_id
     machine_id = "1"  # 默认使用机型1
-    
+
     if video_name and "video_machine_mapping" in data:
         mapping = data["video_machine_mapping"]
         if video_name in mapping:
             machine_id = str(mapping[video_name])
     if selected_machine is not None:
         machine_id = str(selected_machine)
-    
+
     # 处理新格式（包含 regions 字段）
     if "regions" in data:
         regions_data = data["regions"]
         result = {}
-        
+
         for region_name, machine_configs in regions_data.items():
-            if region_name.startswith('_'):  # 跳过注释字段
+            if region_name.startswith("_"):  # 跳过注释字段
                 continue
-            
+
             if isinstance(machine_configs, dict):
                 # 新格式：{"1": [[coords], [header]], "2": [[coords], [header]]}
                 if machine_id in machine_configs:
@@ -136,21 +155,29 @@ def load_roi_header_config(path: Path = Path("config/rois.json"), video_name: Op
                         # 取第二个元素作为 header 座标
                         if isinstance(region_data[1], list) and len(region_data[1]) > 0:
                             result[region_name] = region_data[1]
-        
+
         return result
-    
+
     # 兼容旧格式
     result = {}
     for region_name, region_data in data.items():
-        if region_name.startswith('_') or region_name in ['video_machine_mapping', 'regions']:
+        if region_name.startswith("_") or region_name in [
+            "video_machine_mapping",
+            "regions",
+        ]:
             continue
-            
-        if isinstance(region_data, list) and len(region_data) == 2 and isinstance(region_data[0], list):
+
+        if (
+            isinstance(region_data, list)
+            and len(region_data) == 2
+            and isinstance(region_data[0], list)
+        ):
             # 旧格式: [[roi_coords], [header_coords]]
             if isinstance(region_data[1], list) and len(region_data[1]) > 0:
                 result[region_name] = region_data[1]
-    
+
     return result
+
 
 def load_stage_config(path: Path) -> dict[str, List[int]]:
     """Load OCR activation stages dictionary from JSON file."""
@@ -160,6 +187,7 @@ def load_stage_config(path: Path) -> dict[str, List[int]]:
         data: dict[str, List[int]] = json.load(f)
     return data
 
+
 def load_ocr_char_sets_config(path: Path) -> dict[str, str]:
     """Load OCR character sets dictionary from JSON file."""
     if not path.exists():
@@ -167,6 +195,7 @@ def load_ocr_char_sets_config(path: Path) -> dict[str, str]:
     with open(path, "r", encoding="utf-8") as f:
         data: dict[str, str] = json.load(f)
     return data
+
 
 def load_pattern_name_mapping(path: Path) -> Dict[str, Dict[str, str]]:
     """Load pattern ID to name mapping from JSON file."""
@@ -177,15 +206,17 @@ def load_pattern_name_mapping(path: Path) -> Dict[str, Dict[str, str]]:
         data: Dict[str, Dict[str, str]] = json.load(f)
     return data
 
+
 def get_diff_rule_config_path() -> Path:
     """回傳 config/diff_rule.json 路徑"""
     return Path("config") / "diff_rule.json"
+
 
 def load_diff_rules(config_path: Optional[Path] = None) -> Dict[str, Any]:
     """載入差異分析規則配置（可傳入機型專屬路徑，預設為 config/diff_rule.json）"""
     if config_path is None:
         config_path = get_diff_rule_config_path()
-    
+
     # 預設配置
     default_config = {
         "PEDAL": {
@@ -193,16 +224,16 @@ def load_diff_rules(config_path: Optional[Path] = None) -> Dict[str, Any]:
             "sub_roi_coords": [20, 13, 26, 19],
             "diff": "rmse",
             "diff_threshold": 30.0,
-            "description": "PEDAL區域精細分析範圍"
+            "description": "PEDAL區域精細分析範圍",
         },
         "STAGE": {
             "analysis_mode": "full_roi",
             "diff": "rmse",
             "diff_threshold": 15.0,
-            "description": "STAGE區域使用完整ROI"
-        }
+            "description": "STAGE區域使用完整ROI",
+        },
     }
-    
+
     try:
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as f:
@@ -223,6 +254,7 @@ def load_diff_rules(config_path: Optional[Path] = None) -> Dict[str, Any]:
         print(f"載入差異規則配置失敗: {e}，使用預設配置")
         return default_config
 
+
 def save_diff_rules(config: Dict[str, Any]) -> bool:
     """儲存差異分析規則配置"""
     config_path = get_diff_rule_config_path()
@@ -235,6 +267,7 @@ def save_diff_rules(config: Dict[str, Any]) -> bool:
         print(f"儲存差異規則配置失敗: {e}")
         return False
 
+
 @lru_cache(maxsize=8)
 def load_setting_regions_config(path: Path = None) -> Dict[str, Any]:
     """載入設定值區域配置
@@ -244,24 +277,25 @@ def load_setting_regions_config(path: Path = None) -> Dict[str, Any]:
     """
     if path is None:
         path = Path("config") / "setting_regions.json"
-    
+
     # 預設配置
     default_config = {
-        "regions_with_setting_detection": ["region1", "region2", "region3", "region4", "region5"],
+        "regions_with_setting_detection": [
+            "region1",
+            "region2",
+            "region3",
+            "region4",
+            "region5",
+        ],
         "detection_config": {
-            "sub_region_coords": {
-                "x1": 60,
-                "x2": 120,
-                "y1": 46,
-                "y2": 50
-            },
+            "sub_region_coords": {"x1": 60, "x2": 120, "y1": 46, "y2": 50},
             "white_pixel_threshold": 0.02,
-            "description": "如果子區域白色像素比例超過2%，判定為運作值（大數字）；否則為設定值（小數字）"
+            "description": "如果子區域白色像素比例超過2%，判定為運作值（大數字）；否則為設定值（小數字）",
         },
         "regions_without_setting_detection": ["region6", "region7"],
-        "default_setting_value": False
+        "default_setting_value": False,
     }
-    
+
     try:
         if path.exists():
             with open(path, "r", encoding="utf-8") as f:
@@ -278,24 +312,27 @@ def load_setting_regions_config(path: Path = None) -> Dict[str, Any]:
         print(f"載入設定區域配置失敗: {e}，使用預設配置")
         return default_config
 
-def update_video_machine_mapping(video_name: str, machine_id: int, path: Path = Path("config/rois.json")) -> bool:
+
+def update_video_machine_mapping(
+    video_name: str, machine_id: int, path: Path = Path("config/rois.json")
+) -> bool:
     """
     更新視頻到機型的映射關係
-    
+
     Args:
         video_name: 視頻文件名（不含扩展名）
         machine_id: 機型編號（1 或 2）
         path: ROI配置文件路徑（默認: config/rois.json）
-    
+
     Returns:
         bool: 更新成功返回True，失敗返回False
-    
+
     使用示例:
         # 將視頻標記為機型1
-        update_video_machine_mapping("2024-10-18周建碧OS", 1)
-        
+        update_video_machine_mapping("example-machine-1", 1)
+
         # 將視頻標記為機型2
-        update_video_machine_mapping("2024-10-04蔡淑淡os", 2)
+        update_video_machine_mapping("example-machine-1", 2)
     """
     try:
         # 讀取現有配置
@@ -309,62 +346,117 @@ def update_video_machine_mapping(video_name: str, machine_id: int, path: Path = 
                 "video_machine_mapping": {
                     "_comment": "视频名称(不含扩展名)到机型编号的映射，1=机型A，2=机型B"
                 },
-                "regions": {}
+                "regions": {},
             }
-        
+
         # 確保 video_machine_mapping 欄位存在
         if "video_machine_mapping" not in data:
             data["video_machine_mapping"] = {
                 "_comment": "视频名称(不含扩展名)到机型编号的映射，1=机型A，2=机型B"
             }
-        
+
         # 更新映射
         data["video_machine_mapping"][video_name] = machine_id
-        
+
         # 寫回文件
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        
+
         print(f"✓ 已將視頻 '{video_name}' 映射到機型 {machine_id}")
         return True
-        
+
     except Exception as e:
         print(f"✗ 更新視頻機型映射失敗: {e}")
         import traceback
+
         traceback.print_exc()
         return False
 
-def get_video_machine_id(video_name: str, path: Path = Path("config/rois.json")) -> Optional[int]:
+
+def get_video_machine_id(
+    video_name: str, path: Path = Path("config/rois.json")
+) -> Optional[int]:
     """
     獲取視頻對應的機型編號
-    
+
     Args:
         video_name: 視頻文件名（不含扩展名）
         path: ROI配置文件路徑（默認: config/rois.json）
-    
+
     Returns:
         int: 機型編號（1 或 2），如果未配置則返回None
     """
     try:
         if not path.exists():
             return None
-        
+
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        
+
         if "video_machine_mapping" in data:
             return data["video_machine_mapping"].get(video_name)
-        
+
         return None
     except Exception as e:
         print(f"獲取視頻機型編號失敗: {e}")
         return None
 
 
-def read_surgery_stage_rois(path: Path) -> Dict[str, List[int]]:
+def read_surgery_stage_rois(path: Path, machine_id=None) -> Dict[str, List[int]]:
+    """Pattern-region boxes for one machine: {region: [x1, y1, x2, y2]}.
+
+    See resolve_stage_rois for the per-machine entry format.
+    """
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return resolve_stage_rois(json.load(f), machine_id)
+
+
+# A region whose box differs between machines that share a pattern route, or
+# that only some of them display, is written as
+#     "AS": {"by_machine": {"2": [1738, 542, 1838, 640]}}
+# instead of a plain box. Machines without an entry do not get the region.
+BY_MACHINE = "by_machine"
+
+
+def resolve_stage_rois(raw: Dict[str, Any], machine_id=None) -> Dict[str, List[int]]:
+    """Resolve a surgery_stage_rois.json payload to plain boxes for one machine.
+
+    Plain boxes apply to every machine. Per-machine entries apply only to the
+    machine they name; with machine_id None (machine unknown) they are left out.
+    """
+    resolved: Dict[str, List[int]] = {}
+    for region, value in raw.items():
+        if isinstance(value, dict) and BY_MACHINE in value:
+            box = (
+                value[BY_MACHINE].get(str(machine_id))
+                if machine_id is not None
+                else None
+            )
+            if box is not None:
+                resolved[region] = list(box)
+        elif isinstance(value, list):
+            resolved[region] = list(value)
+    return resolved
+
+
+def update_stage_roi(
+    raw: Dict[str, Any], region: str, box: List[int], machine_id=None
+) -> None:
+    """Write an edited box back into the raw payload without losing its structure.
+
+    A per-machine region only changes the entry of machine_id; a plain region
+    (or a new one) is stored as a plain box, as before.
+    """
+    value = raw.get(region)
+    if isinstance(value, dict) and BY_MACHINE in value:
+        if machine_id is None:
+            raise ValueError(
+                f"{region} has per-machine boxes; the machine must be known to edit it"
+            )
+        value[BY_MACHINE][str(machine_id)] = list(box)
+    else:
+        raw[region] = list(box)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +467,7 @@ def read_surgery_stage_rois(path: Path) -> Dict[str, List[int]]:
 # config/machine_<key>/<file>; anything without an override falls back to the
 # legacy shared file in config/.
 # ---------------------------------------------------------------------------
+
 
 def get_machine_key(machine_id) -> str:
     """Map a machine id to its pattern-route key (shared assets directory name)."""
@@ -417,24 +510,24 @@ def save_roi_config(
     roi_header_dict: Optional[Dict[str, List[int]]] = None,
     video_name: Optional[str] = None,
     machine_id: Optional[int] = None,
-    path: Path = None
+    path: Path = None,
 ) -> bool:
     """
     儲存 ROI 設定到檔案，保留原有的 video_machine_mapping 和其他機型設定
-    
+
     Args:
         roi_dict: ROI 座標字典 {region_name: [x1, y1, x2, y2]}
         roi_header_dict: ROI Header 座標字典 {region_name: [x1, y1, x2, y2]}（可選）
         video_name: 視頻名稱（用於更新該視頻的機型映射）
         machine_id: 機型編號（如果提供 video_name 則必須）
         path: ROI 配置文件路徑（默認: config/rois.json）
-    
+
     Returns:
         bool: 儲存成功返回 True，失敗返回 False
     """
     if path is None:
         path = get_roi_config_path()
-    
+
     try:
         # 讀取現有配置
         if path.exists():
@@ -447,9 +540,9 @@ def save_roi_config(
                 "video_machine_mapping": {
                     "_comment": "视频名称(不含扩展名)到机型编号的映射，1=机型A，2=机型B"
                 },
-                "regions": {}
+                "regions": {},
             }
-        
+
         # 確保基本結構存在
         if "video_machine_mapping" not in data:
             data["video_machine_mapping"] = {
@@ -457,7 +550,7 @@ def save_roi_config(
             }
         if "regions" not in data:
             data["regions"] = {}
-        
+
         # 決定要更新的機型
         target_machine_id = "1"  # 預設機型
         if video_name and machine_id:
@@ -469,42 +562,46 @@ def save_roi_config(
             mapping = data.get("video_machine_mapping", {})
             if video_name in mapping:
                 target_machine_id = str(mapping[video_name])
-        
+
         # 更新 regions 中對應機型的座標
         for region_name, roi_coords in roi_dict.items():
             if region_name not in data["regions"]:
                 # 初始化該區域（只建立目標機型的空白配置）
                 data["regions"][region_name] = {target_machine_id: [[], []]}
-            
+
             region_data = data["regions"][region_name]
-            
+
             # 確保目標機型的結構存在
             if target_machine_id not in region_data:
                 region_data[target_machine_id] = [[], []]
-            
+
             # 獲取 header 座標（如果存在）
             header_coords = []
             if roi_header_dict and region_name in roi_header_dict:
                 header_coords = roi_header_dict[region_name]
-            elif isinstance(region_data.get(target_machine_id), list) and len(region_data[target_machine_id]) >= 2:
+            elif (
+                isinstance(region_data.get(target_machine_id), list)
+                and len(region_data[target_machine_id]) >= 2
+            ):
                 # 保留原有的 header 座標
                 header_coords = region_data[target_machine_id][1]
-            
+
             # 更新座標：[[roi_coords], [header_coords]]
             region_data[target_machine_id] = [roi_coords, header_coords]
-        
+
         # 寫回文件
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        
+
         print(f"✓ ROI 設定已儲存至 {path}")
         if video_name:
             print(f"  視頻: {video_name}, 機型: {target_machine_id}")
         return True
-        
+
     except Exception as e:
         print(f"✗ 儲存 ROI 設定失敗: {e}")
         import traceback
+
         traceback.print_exc()
         return False

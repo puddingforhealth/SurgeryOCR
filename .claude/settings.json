@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./scripts/check.sh)",
+      "Bash(./scripts/dev.sh)",
+      "Bash(./scripts/doctor.sh)",
+      "Bash(./scripts/setup.sh)",
+      "Bash(pytest *)",
+      "Bash(pytest)",
+      "Bash(ruff *)",
+      "Bash(uv *)",
+      "PowerShell(./scripts/check.ps1)",
+      "PowerShell(./scripts/dev.ps1)",
+      "PowerShell(./scripts/doctor.ps1)",
+      "PowerShell(./scripts/setup.ps1)",
+      "PowerShell(pytest *)",
+      "PowerShell(ruff *)",
+      "PowerShell(uv *)"
+    ]
+  }
+}

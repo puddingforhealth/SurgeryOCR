@@ -142,7 +142,8 @@ else
 fi
 
 echo "== check"
-"$VPY" tools/cloud_videos.py doctor || true
+"$VPY" tools/install_ocr_bundle.py --doctor
+if [ -f tools/cloud_videos.py ]; then "$VPY" tools/cloud_videos.py doctor || true; fi
 
 cat <<EOF
 

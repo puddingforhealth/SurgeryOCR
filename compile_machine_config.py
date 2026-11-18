@@ -15,6 +15,7 @@ unknown/unrelated entries are preserved.
 Usage:
     python compile_machine_config.py --machine 3 [--dry-run]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,10 +38,10 @@ FALLBACK_CHAR_SET = "-0123456789."
 # default per-machine OCR strategy written once (tunable afterwards)
 OCR_STRATEGY_DEFAULTS = {
     "3": {
-        "ocr_input": "gray",       # feed grayscale crops to OCR (translucent overlay)
-        "stable_frames": 4,        # debounce: OCR only after N stable frames
-        "min_ocr_height": 32,      # upscale small crops before OCR
-        "diff_threshold": 0.02,    # change-detection threshold (binary XOR ratio)
+        "ocr_input": "gray",  # feed grayscale crops to OCR (translucent overlay)
+        "stable_frames": 4,  # debounce: OCR only after N stable frames
+        "min_ocr_height": 32,  # upscale small crops before OCR
+        "diff_threshold": 0.02,  # change-detection threshold (binary XOR ratio)
     },
 }
 
@@ -63,7 +64,9 @@ def save_json(path: Path, data, dry_run: bool):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Compile capture_log.json into pipeline configs")
+    ap = argparse.ArgumentParser(
+        description="Compile capture_log.json into pipeline configs"
+    )
     ap.add_argument("--machine", required=True, help="machine id (e.g. 3)")
     ap.add_argument("--dry-run", action="store_true", help="print without writing")
     args = ap.parse_args()
@@ -90,7 +93,9 @@ def main():
         pngs = sorted((mdir / region).glob("*.png")) if (mdir / region).exists() else []
         npys = sorted((mdir / region).glob("*.npy")) if (mdir / region).exists() else []
         if len(pngs) != len(npys):
-            problems.append(f"'{region}': {len(pngs)} png vs {len(npys)} npy (mismatch)")
+            problems.append(
+                f"'{region}': {len(pngs)} png vs {len(npys)} npy (mismatch)"
+            )
     if stage_rois:
         save_json(cfg_dir / "surgery_stage_rois.json", stage_rois, args.dry_run)
 
@@ -98,12 +103,16 @@ def main():
     name_map = {}
     for region, entry in pattern_regions.items():
         mapping = {}
-        for pid, pat in sorted(entry.get("patterns", {}).items(), key=lambda x: int(x[0])):
+        for pid, pat in sorted(
+            entry.get("patterns", {}).items(), key=lambda x: int(x[0])
+        ):
             label = pat.get("label")
             if label:
                 mapping[pid] = label
             else:
-                problems.append(f"'{region}' pattern #{pid} is unlabeled (frame {pat.get('frame')})")
+                problems.append(
+                    f"'{region}' pattern #{pid} is unlabeled (frame {pat.get('frame')})"
+                )
         if mapping:
             name_map[region] = mapping
     if name_map:
@@ -125,7 +134,9 @@ def main():
         merged += 1
         header_png = mdir / "roi_headers" / f"{name}.png"
         if header and not header_png.exists():
-            problems.append(f"region '{name}' has header coords but no template: {header_png}")
+            problems.append(
+                f"region '{name}' has header coords but no template: {header_png}"
+            )
     if merged:
         save_json(rois_path, rois, args.dry_run)
         print(f"  merged {merged} region entries under machine '{mid}'")

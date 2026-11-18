@@ -18,6 +18,7 @@ Controls:
     W / A / S / D       nudge rectangle by 1 px (Shift: 5 px)
     coordinate fields   type exact values, then "套用座標"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -87,14 +88,22 @@ class RoiPicker(tk.Frame):
     def _build_ui(self):
         top = tk.Frame(self)
         top.pack(fill="x", padx=6, pady=4)
-        tk.Button(top, text="開啟影片/圖片", command=self._open_dialog).pack(side="left")
+        tk.Button(top, text="開啟影片/圖片", command=self._open_dialog).pack(
+            side="left"
+        )
         self.lbl_source = tk.Label(top, text="(未載入)", anchor="w")
         self.lbl_source.pack(side="left", padx=8)
 
         nav = tk.Frame(self)
         nav.pack(fill="x", padx=6)
-        self.slider = tk.Scale(nav, from_=0, to=0, orient="horizontal",
-                               showvalue=False, command=self._on_slider)
+        self.slider = tk.Scale(
+            nav,
+            from_=0,
+            to=0,
+            orient="horizontal",
+            showvalue=False,
+            command=self._on_slider,
+        )
         self.slider.pack(side="left", fill="x", expand=True)
         self.ent_frame = tk.Entry(nav, width=8)
         self.ent_frame.pack(side="left", padx=4)
@@ -105,8 +114,9 @@ class RoiPicker(tk.Frame):
         body = tk.Frame(self)
         body.pack(fill="both", expand=True, padx=6, pady=4)
 
-        self.canvas = tk.Canvas(body, bg="#222", cursor="tcross",
-                                width=MAX_DISPLAY_W, height=MAX_DISPLAY_H)
+        self.canvas = tk.Canvas(
+            body, bg="#222", cursor="tcross", width=MAX_DISPLAY_W, height=MAX_DISPLAY_H
+        )
         self.canvas.pack(side="left", fill="both", expand=True)
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
@@ -127,11 +137,17 @@ class RoiPicker(tk.Frame):
         self.coord_vars = [tk.StringVar() for _ in range(4)]
         for i, name in enumerate(["x1", "y1", "x2", "y2"]):
             tk.Label(row, text=name).pack(side="left")
-            tk.Entry(row, width=6, textvariable=self.coord_vars[i]).pack(side="left", padx=(0, 6))
+            tk.Entry(row, width=6, textvariable=self.coord_vars[i]).pack(
+                side="left", padx=(0, 6)
+            )
         btns = tk.Frame(coord)
         btns.pack(fill="x", pady=2)
-        tk.Button(btns, text="套用座標", command=self._apply_coord_fields).pack(side="left", padx=2)
-        tk.Button(btns, text="複製座標", command=self._copy_coords).pack(side="left", padx=2)
+        tk.Button(btns, text="套用座標", command=self._apply_coord_fields).pack(
+            side="left", padx=2
+        )
+        tk.Button(btns, text="複製座標", command=self._copy_coords).pack(
+            side="left", padx=2
+        )
         self.lbl_size = tk.Label(coord, text="尺寸: -", anchor="w")
         self.lbl_size.pack(fill="x")
 
@@ -139,10 +155,24 @@ class RoiPicker(tk.Frame):
         binf.pack(fill="x", pady=4)
         self.var_sat = tk.IntVar(value=30)
         self.var_gray = tk.IntVar(value=150)
-        tk.Scale(binf, from_=0, to=100, orient="horizontal", label="HSV 飽和度上限 (S%)",
-                 variable=self.var_sat, command=lambda _v: self._update_preview()).pack(fill="x")
-        tk.Scale(binf, from_=0, to=255, orient="horizontal", label="灰階亮度下限",
-                 variable=self.var_gray, command=lambda _v: self._update_preview()).pack(fill="x")
+        tk.Scale(
+            binf,
+            from_=0,
+            to=100,
+            orient="horizontal",
+            label="HSV 飽和度上限 (S%)",
+            variable=self.var_sat,
+            command=lambda _v: self._update_preview(),
+        ).pack(fill="x")
+        tk.Scale(
+            binf,
+            from_=0,
+            to=255,
+            orient="horizontal",
+            label="灰階亮度下限",
+            variable=self.var_gray,
+            command=lambda _v: self._update_preview(),
+        ).pack(fill="x")
 
         prev = tk.LabelFrame(side, text="預覽 (原始 / 二值化)")
         prev.pack(fill="x", pady=4)
@@ -159,37 +189,66 @@ class RoiPicker(tk.Frame):
         qrow1.pack(fill="x", pady=1)
         tk.Label(qrow1, text="機型 ID").pack(side="left")
         self.var_machine = tk.StringVar(value="3")
-        tk.Entry(qrow1, width=4, textvariable=self.var_machine).pack(side="left", padx=(2, 10))
+        tk.Entry(qrow1, width=4, textvariable=self.var_machine).pack(
+            side="left", padx=(2, 10)
+        )
         tk.Label(qrow1, text="區域名").pack(side="left")
         self.var_region = tk.StringVar()
-        tk.Entry(qrow1, width=12, textvariable=self.var_region).pack(side="left", padx=2)
+        tk.Entry(qrow1, width=12, textvariable=self.var_region).pack(
+            side="left", padx=2
+        )
         qrow2 = tk.Frame(quick)
         qrow2.pack(fill="x", pady=1)
         self.var_kind = tk.StringVar(value="pattern")
-        for text, val in [("Pattern樣板", "pattern"), ("Header樣板", "header"), ("數值區座標", "value")]:
-            tk.Radiobutton(qrow2, text=text, variable=self.var_kind, value=val).pack(side="left")
+        for text, val in [
+            ("Pattern樣板", "pattern"),
+            ("Header樣板", "header"),
+            ("數值區座標", "value"),
+        ]:
+            tk.Radiobutton(qrow2, text=text, variable=self.var_kind, value=val).pack(
+                side="left"
+            )
         qrow3 = tk.Frame(quick)
         qrow3.pack(fill="x", pady=1)
         tk.Label(qrow3, text="樣板標籤").pack(side="left")
         self.var_label = tk.StringVar()
-        tk.Entry(qrow3, width=20, textvariable=self.var_label).pack(side="left", padx=2, fill="x", expand=True)
-        tk.Button(quick, text="快速儲存", command=self._quick_save).pack(fill="x", pady=2)
+        tk.Entry(qrow3, width=20, textvariable=self.var_label).pack(
+            side="left", padx=2, fill="x", expand=True
+        )
+        tk.Button(quick, text="快速儲存", command=self._quick_save).pack(
+            fill="x", pady=2
+        )
 
         save = tk.LabelFrame(side, text="手動存檔")
         save.pack(fill="x", pady=4)
-        tk.Button(save, text="存二值化樣板 PNG", command=lambda: self._save_crop(binary=True)).pack(fill="x", pady=1)
-        tk.Button(save, text="存原始裁切 PNG", command=lambda: self._save_crop(binary=False)).pack(fill="x", pady=1)
-        tk.Button(save, text="存整張畫面 PNG", command=self._save_full_frame).pack(fill="x", pady=1)
+        tk.Button(
+            save, text="存二值化樣板 PNG", command=lambda: self._save_crop(binary=True)
+        ).pack(fill="x", pady=1)
+        tk.Button(
+            save, text="存原始裁切 PNG", command=lambda: self._save_crop(binary=False)
+        ).pack(fill="x", pady=1)
+        tk.Button(save, text="存整張畫面 PNG", command=self._save_full_frame).pack(
+            fill="x", pady=1
+        )
 
-        self.status = tk.Label(self, text="拖曳滑鼠圈選區域；方向鍵切換幀 (Shift ±10, Ctrl ±100)；WASD 微調位置",
-                               anchor="w", relief="sunken")
+        self.status = tk.Label(
+            self,
+            text="拖曳滑鼠圈選區域；方向鍵切換幀 (Shift ±10, Ctrl ±100)；WASD 微調位置",
+            anchor="w",
+            relief="sunken",
+        )
         self.status.pack(fill="x", side="bottom")
 
     def _bind_keys(self):
         m = self.master
         m.bind("<Left>", lambda e: self._step(-self._step_size(e)))
         m.bind("<Right>", lambda e: self._step(self._step_size(e)))
-        for key, (dx, dy) in {"a": (-1, 0), "d": (1, 0), "w": (0, -1), "s": (0, 1)}.items():
+        for key, (dx, dy) in {
+            "a": (-1, 0),
+            "d": (1, 0),
+            "w": (0, -1),
+            "s": (0, 1),
+        }.items():
             m.bind(key, lambda e, dx=dx, dy=dy: self._nudge(dx, dy))
             m.bind(key.upper(), lambda e, dx=dx, dy=dy: self._nudge(dx * 5, dy * 5))
 
@@ -209,8 +268,11 @@ class RoiPicker(tk.Frame):
     def _open_dialog(self):
         path = filedialog.askopenfilename(
             title="選擇影片或圖片",
-            filetypes=[("影片/圖片", "*.mp4 *.MP4 *.avi *.mov *.mkv *.png *.jpg *.jpeg *.bmp"),
-                       ("所有檔案", "*.*")])
+            filetypes=[
+                ("影片/圖片", "*.mp4 *.MP4 *.avi *.mov *.mkv *.png *.jpg *.jpeg *.bmp"),
+                ("所有檔案", "*.*"),
+            ],
+        )
         if path:
             self._open_source(Path(path))
 
@@ -314,7 +376,9 @@ class RoiPicker(tk.Frame):
         if not self.rect:
             return
         x1, y1, x2, y2 = [v * self.scale for v in self.rect]
-        self.canvas.create_rectangle(x1, y1, x2, y2, outline="#00ff00", width=2, tags="roi")
+        self.canvas.create_rectangle(
+            x1, y1, x2, y2, outline="#00ff00", width=2, tags="roi"
+        )
 
     def _to_orig(self, cx: float, cy: float) -> Tuple[int, int]:
         if self.frame_bgr is None:
@@ -410,7 +474,9 @@ class RoiPicker(tk.Frame):
         crop = self._get_crop()
         if crop is None:
             return None
-        return binarize(crop, hsv_s_thresh=self.var_sat.get(), gray_thresh=self.var_gray.get())
+        return binarize(
+            crop, hsv_s_thresh=self.var_sat.get(), gray_thresh=self.var_gray.get()
+        )
 
     def _update_preview(self):
         crop = self._get_crop()
@@ -424,13 +490,18 @@ class RoiPicker(tk.Frame):
         white_ratio = np.count_nonzero(binary) / binary.size if binary.size else 0.0
         self.lbl_white.configure(text=f"白色像素比例: {white_ratio:.4f}")
 
-        for img, widget in ((cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), self.preview_raw),
-                            (binary, self.preview_bin)):
+        for img, widget in (
+            (cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), self.preview_raw),
+            (binary, self.preview_bin),
+        ):
             h, w = img.shape[:2]
             zoom = min(PREVIEW_ZOOM, PREVIEW_MAX_W / w, PREVIEW_MAX_H / h)
             zoom = max(zoom, 0.1)
-            disp = cv2.resize(img, (max(1, int(w * zoom)), max(1, int(h * zoom))),
-                              interpolation=cv2.INTER_NEAREST)
+            disp = cv2.resize(
+                img,
+                (max(1, int(w * zoom)), max(1, int(h * zoom))),
+                interpolation=cv2.INTER_NEAREST,
+            )
             photo = ImageTk.PhotoImage(Image.fromarray(disp))
             self._preview_photos.append(photo)
             widget.configure(image=photo)
@@ -461,7 +532,8 @@ class RoiPicker(tk.Frame):
                     pass
                 messagebox.showwarning(
                     "capture_log 讀取失敗",
-                    f"無法解析 {p}，已備份為 {backup.name} 並改用空白記錄。")
+                    f"無法解析 {p}，已備份為 {backup.name} 並改用空白記錄。",
+                )
         log.setdefault("pattern_regions", {})
         log.setdefault("regions", {})
         # migrate legacy top-level STAGE entry into pattern_regions
@@ -471,7 +543,10 @@ class RoiPicker(tk.Frame):
         return log
 
     def _write_capture_log(self, mdir: Path, log: dict):
-        log["binarize"] = {"hsv_s_thresh": self.var_sat.get(), "gray_thresh": self.var_gray.get()}
+        log["binarize"] = {
+            "hsv_s_thresh": self.var_sat.get(),
+            "gray_thresh": self.var_gray.get(),
+        }
         with open(mdir / "capture_log.json", "w", encoding="utf-8") as f:
             json.dump(log, f, ensure_ascii=False, indent=2)
 
@@ -498,13 +573,16 @@ class RoiPicker(tk.Frame):
             return
 
         if kind == "pattern":
-            preg = log["pattern_regions"].setdefault(name, {"coords": None, "patterns": {}})
+            preg = log["pattern_regions"].setdefault(
+                name, {"coords": None, "patterns": {}}
+            )
             logged = preg.get("coords")
             if logged and list(self.rect) != list(logged):
                 use_logged = messagebox.askyesno(
                     "座標不一致",
                     f"已記錄的 {name} 框為 {logged}\n目前圈選為 {list(self.rect)}\n\n"
-                    "是 = 改用已記錄座標（同區所有樣板必須同框）\n否 = 以目前圈選覆蓋記錄")
+                    "是 = 改用已記錄座標（同區所有樣板必須同框）\n否 = 以目前圈選覆蓋記錄",
+                )
                 if use_logged:
                     self.rect = tuple(logged)
                     self._draw_rect()
@@ -529,7 +607,9 @@ class RoiPicker(tk.Frame):
                 entry["label"] = label
             preg.setdefault("patterns", {})[str(pid)] = entry
             self._write_capture_log(mdir, log)
-            self._set_status(f"{name} 樣板 #{pid}『{label or '(未標記)'}』已存: {out}  座標={list(self.rect)}")
+            self._set_status(
+                f"{name} 樣板 #{pid}『{label or '(未標記)'}』已存: {out}  座標={list(self.rect)}"
+            )
             self.var_label.set("")
             return
         region = log.setdefault("regions", {}).setdefault(name, {})
@@ -551,7 +631,9 @@ class RoiPicker(tk.Frame):
             region["value_frame"] = self.frame_idx
             region["value_video"] = src
             self._write_capture_log(mdir, log)
-            self._set_status(f"數值區座標已記錄: {name} = {list(self.rect)} → capture_log.json")
+            self._set_status(
+                f"數值區座標已記錄: {name} = {list(self.rect)} → capture_log.json"
+            )
 
     # ----------------------------------------------------------------- saving
     def _save_crop(self, binary: bool):
@@ -562,16 +644,21 @@ class RoiPicker(tk.Frame):
         kind = "binary" if binary else "raw"
         default_name = f"{self.source_path.stem if self.source_path else 'crop'}_f{self.frame_idx}_{kind}.png"
         path = filedialog.asksaveasfilename(
-            title="儲存裁切圖", defaultextension=".png", initialfile=default_name,
+            title="儲存裁切圖",
+            defaultextension=".png",
+            initialfile=default_name,
             initialdir=str(Path("data/roi_img_caches")),
-            filetypes=[("PNG", "*.png")])
+            filetypes=[("PNG", "*.png")],
+        )
         if not path:
             return
         if imwrite_unicode(Path(path), img):
             # pattern caches are loaded from .npy by the pipeline; keep .png for humans
             if binary:
                 np.save(str(Path(path).with_suffix(".npy")), img)
-            self._set_status(f"已儲存 {kind} 樣板: {path}{' (+.npy)' if binary else ''}  座標={list(self.rect)}")
+            self._set_status(
+                f"已儲存 {kind} 樣板: {path}{' (+.npy)' if binary else ''}  座標={list(self.rect)}"
+            )
         else:
             messagebox.showerror("錯誤", f"儲存失敗: {path}")
 
@@ -580,8 +667,11 @@ class RoiPicker(tk.Frame):
             return
         default_name = f"{self.source_path.stem if self.source_path else 'frame'}_f{self.frame_idx}.png"
         path = filedialog.asksaveasfilename(
-            title="儲存整張畫面", defaultextension=".png", initialfile=default_name,
-            filetypes=[("PNG", "*.png")])
+            title="儲存整張畫面",
+            defaultextension=".png",
+            initialfile=default_name,
+            filetypes=[("PNG", "*.png")],
+        )
         if not path:
             return
         if imwrite_unicode(Path(path), self.frame_bgr):
@@ -593,11 +683,13 @@ class RoiPicker(tk.Frame):
 
 def main():
     parser = argparse.ArgumentParser(description="Interactive ROI picker")
-    parser.add_argument("--video", type=Path, default=None, help="影片或圖片路徑 (省略則開檔案對話框)")
+    parser.add_argument(
+        "--video", type=Path, default=None, help="影片或圖片路徑 (省略則開檔案對話框)"
+    )
     args = parser.parse_args()
 
     root = tk.Tk()
-    app = RoiPicker(root, source=args.video)
+    _app = RoiPicker(root, source=args.video)
     root.mainloop()
 
 

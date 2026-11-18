@@ -12,5 +12,25 @@
     "diff": "rmse",
     "diff_threshold": 15.0,
     "description": "STAGE區域使用完整ROI"
+  },
+  "AS": {
+    "match_mode": "binary",
+    "binarize": "hsv_mask",
+    "hsv_ranges": [{"h": [0, 179], "s": [0, 60], "v": [185, 255]}],
+    "diff": "rmse",
+    "diff_threshold": 35.0,
+    "description": "Active Sentry icon below Vac (machine 2 only). The white glyph is selected by colour; RMSE 10-15 when shown, 70 when absent."
+  },
+  "STATUS": {
+    "match_mode": "binary",
+    "binarize": "hsv_mask",
+    "hsv_ranges": [
+      {"h": [0, 179], "s": [0, 255], "v": [0, 85]},
+      {"h": [0, 8], "s": [110, 255], "v": [110, 255]},
+      {"h": [170, 179], "s": [110, 255], "v": [110, 255]}
+    ],
+    "diff": "rmse",
+    "diff_threshold": 62.0,
+    "description": "Status message on a translucent panel below Vac. Only Occlusion (red text) is tracked; the panel also shows Vent (black text), which has no template and so never matches. Text is selected by colour so what shows through the panel is ignored. RMSE <= 50 Occlusion, >= 106 Vent, >= 75 no panel."
   }
 }

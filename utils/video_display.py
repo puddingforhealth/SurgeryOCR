@@ -6,7 +6,7 @@ def fit_video_size(source_size, viewport_size):
     width, height = source_size
     available_width, available_height = viewport_size
     if min(width, height, available_width, available_height) <= 0:
-        raise ValueError('Image and viewport dimensions must be positive')
+        raise ValueError("Image and viewport dimensions must be positive")
     if available_width * height <= available_height * width:
         return int(available_width), max(1, int(available_width * height / width))
     return max(1, int(available_height * width / height)), int(available_height)

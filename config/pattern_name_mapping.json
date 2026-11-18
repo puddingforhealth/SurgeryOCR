@@ -16,7 +16,7 @@
     "8": "End Case",
     "9": "Coag 1",
     "10": "Coag 2",
-    "11": "AutoSert",   
+    "11": "AutoSert",
     "12": "Fill",
     "13": "Irr F/S",
     "14": "Polish",
@@ -31,5 +31,11 @@
     "23": "Pseudophakic",
     "24": "Cortex",
     "25": "UltraChop"
+  },
+  "AS": {
+    "1": "AS"
+  },
+  "STATUS": {
+    "1": "Occlusion"
   }
 }

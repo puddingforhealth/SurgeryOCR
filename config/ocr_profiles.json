@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "default_profile": "enhanced",
+  "legacy_machine3_rois": {
+    "IOP": [
+      1806,
+      308,
+      1857,
+      337
+    ],
+    "ASP": [
+      1748,
+      482,
+      1915,
+      516
+    ],
+    "VAC": [
+      1748,
+      568,
+      1915,
+      610
+    ],
+    "PEL": [
+      1806,
+      745,
+      1852,
+      766
+    ],
+    "INFLOW": [
+      1814,
+      824,
+      1846,
+      849
+    ],
+    "INCISION": [
+      1814,
+      908,
+      1845,
+      926
+    ],
+    "REFLUX": [
+      1814,
+      1053,
+      1840,
+      1068
+    ],
+    "CDE": [
+      1778,
+      50,
+      1875,
+      82
+    ]
+  },
+  "legacy_machine3_strategy": {
+    "ocr_input": "gray",
+    "stable_frames": 4,
+    "min_ocr_height": 48,
+    "diff_threshold": 0.02,
+    "leading_minus_regions": [
+      "PEL"
+    ],
+    "value_formats": {
+      "INCISION": {
+        "decimal_places": 1
+      }
+    }
+  },
+  "legacy_char_sets": {
+    "region6": "0123456789.",
+    "IOP": "0123456789",
+    "ASP": "0123456789",
+    "VAC": "0123456789",
+    "PEL": "-0123456789",
+    "INFLOW": "0123456789",
+    "INCISION": "0123456789.",
+    "REFLUX": "0123456789",
+    "CDE": "0123456789."
+  },
+  "binary_sensitivity": "standard"
+}

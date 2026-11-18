@@ -3,15 +3,82 @@ import queue
 import cv2
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterator, List, Tuple
 import numpy as np
+import tempfile
+
+
+class FrameSpool:
+    """Bound encoded-frame RAM while preserving pixels during machine discovery."""
+
+    def __init__(self, memory_bytes=128 * 1024 * 1024):
+        self.memory_bytes = memory_bytes
+        self.used_bytes = 0
+        self.items = []
+        self._directory = None
+
+    def __len__(self):
+        return len(self.items)
+
+    def append(self, item):
+        index, encoded = item
+        if self.used_bytes + encoded.nbytes <= self.memory_bytes:
+            self.items.append((index, encoded))
+            self.used_bytes += encoded.nbytes
+        else:
+            if self._directory is None:
+                self._directory = tempfile.TemporaryDirectory(
+                    prefix="surgeryocr-frame-spool-"
+                )
+            path = Path(self._directory.name) / f"{len(self.items)}.png"
+            encoded.tofile(path)
+            self.items.append((index, path))
+
+    def __iter__(self):
+        for index, encoded in self.items:
+            yield (
+                index,
+                np.fromfile(encoded, dtype=np.uint8)
+                if isinstance(encoded, Path)
+                else encoded,
+            )
+
+    def clear(self):
+        self.items.clear()
+        self.used_bytes = 0
+        if self._directory is not None:
+            self._directory.cleanup()
+            self._directory = None
 
 
 def find_videos(target: Path) -> List[Path]:
     """The file itself, or every .mp4 (any case) under a directory, subfolders included."""
     if target.is_file():
         return [target]
-    return sorted(p for p in target.rglob("*") if p.is_file() and p.suffix.lower() == ".mp4")
+    return sorted(
+        p for p in target.rglob("*") if p.is_file() and p.suffix.lower() == ".mp4"
+    )
+
+
+def iter_video_frames(cap: cv2.VideoCapture) -> Iterator[Tuple[int, np.ndarray, float]]:
+    """Yield (frame_idx, frame_bgr, timestamp_ms) from a VideoCapture.
+
+    The timestamp is read after the decode: CAP_PROP_POS_MSEC then reports the
+    presentation time of the frame just returned (read before, it lags one frame).
+    The index still advances across an undecodable frame so the timeline stays
+    aligned with the source.
+    """
+    frame_idx = 0
+    while cap.isOpened():
+        ret, frame_bgr = cap.read()
+        if not ret:
+            break
+        ts = cap.get(cv2.CAP_PROP_POS_MSEC)
+        if frame_bgr is None or frame_bgr.size == 0:
+            frame_idx += 1
+            continue
+        yield frame_idx, frame_bgr, ts
+        frame_idx += 1
 
 
 def duplicate_stems(videos: List[Path]) -> Dict[str, List[Path]]:
@@ -42,7 +109,7 @@ class AsyncImageSaver:
             try:
                 item = self.queue.get(timeout=0.1)
                 img, path, params = item
-                
+
                 # 確保目錄存在
                 parent = path.parent
                 parent_key = str(parent)
@@ -52,7 +119,7 @@ class AsyncImageSaver:
                     except OSError:
                         pass
                     self._created_dirs.add(parent_key)
-                
+
                 try:
                     suffix = path.suffix.lower() or ".png"
                     # cv2.imencode 需要前導點，如 .jpg/.png
@@ -65,7 +132,7 @@ class AsyncImageSaver:
                     self.total_saved += 1
                 except Exception as e:
                     print(f"[AsyncSaver] Error saving {path}: {e}")
-                
+
                 self.queue.task_done()
             except queue.Empty:
                 continue

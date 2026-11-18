@@ -1,0 +1,39 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Setup (Unix)
+        if: runner.os != 'Windows'
+        run: SKIP_GCLOUD=1 bash scripts/setup.sh
+        shell: bash
+      - name: Setup (Windows)
+        if: runner.os == 'Windows'
+        run: ./scripts/setup.ps1
+        shell: pwsh
+      - name: Check (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          .venv/bin/python -m pip install ruff==0.15.11 pytest==9.0.3
+          xvfb-run -a bash scripts/check.sh
+        shell: bash
+      - name: Check (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .\.venv\Scripts\python.exe -m pip install ruff==0.15.11 pytest==9.0.3
+          ./scripts/check.ps1
+        shell: pwsh

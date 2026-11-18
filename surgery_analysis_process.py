@@ -4,12 +4,16 @@ Script: surgery_analysis_process.py
 -----------------------------------
 Frame-change detection + OCR utility (CLI & Library Mode).
 """
+
 from __future__ import annotations
 import os
-os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import argparse
 import json
 import time
+import hashlib
+from collections import OrderedDict
 from pathlib import Path
 from functools import lru_cache
 from typing import List, Tuple, Dict, Any, Optional
@@ -26,27 +30,46 @@ import torch
 # --- Core API Import ---
 from extract_roi_images import iterate_roi_binary_from_cache
 from extract_frame_cache import get_video_meta
-from utils.cv_processing import calculate_average_binary_diff, is_single_digit, trim_black_borders, binarize
+from utils.cv_processing import (
+    calculate_average_binary_diff,
+    is_single_digit,
+    trim_black_borders,
+    binarize,
+)
 from utils.get_analysis_results import get_stage_analysis_json
-from utils.get_configs import load_roi_config, load_stage_config, load_roi_header_config, load_ocr_char_sets_config, load_setting_regions_config
+from utils.get_configs import (
+    load_roi_config,
+    load_stage_config,
+    load_roi_header_config,
+    load_ocr_char_sets_config,
+    load_setting_regions_config,
+)
 from utils.get_paths import resolve_video_analysis_dir
+
 
 # --------------------------------------------------------------------------
 # [NEW] OCRProcessor Class for Pipeline Integration
 # --------------------------------------------------------------------------
 class OCRProcessor:
-    def __init__(self,
-                 stage_activation_dict: Dict[str, List[int]],
-                 roi_header_dict: Dict[str, List[int]],
-                 char_sets_dict: Dict[str, str],
-                 diff_threshold: float = 0.01,
-                 header_template_dir: Optional[Path] = None,
-                 ocr_input: str = "binary",
-                 stable_frames: int = 0,
-                 min_ocr_height: int = 0,
-                 leading_minus_regions: Optional[List[str]] = None,
-                 value_formats: Optional[Dict[str, Dict]] = None,
-                 skip_ocr_detector: bool = False):
+    def __init__(
+        self,
+        stage_activation_dict: Dict[str, List[int]],
+        roi_header_dict: Dict[str, List[int]],
+        char_sets_dict: Dict[str, str],
+        diff_threshold: float = 0.01,
+        header_template_dir: Optional[Path] = None,
+        ocr_input: str = "binary",
+        stable_frames: int = 0,
+        min_ocr_height: int = 0,
+        leading_minus_regions: Optional[List[str]] = None,
+        value_formats: Optional[Dict[str, Dict]] = None,
+        skip_ocr_detector: bool = False,
+        ocr_runtime=None,
+        exact_cache_regions=None,
+        gpu=None,
+        scene_frame_size=None,
+        exact_change_regions=None,
+    ):
         """
         ocr_input:      "binary" 餵二值圖給 OCR（機型1/2，不透明面板）；
                         "gray" 餵灰階原圖（機型3，半透明面板時二值圖易被背景汙染）。
@@ -71,32 +94,52 @@ class OCRProcessor:
         self.min_ocr_height = min_ocr_height
         self.leading_minus_regions = set(leading_minus_regions or [])
         self.value_formats = value_formats or {}
-        
+
         # Initialize OCR Model
-        self.ocr_iface = get_ocr_model(
-            model_type="easyocr",
-            gpu=torch.cuda.is_available(),
-            lang_list=['en'],
-            confidence_threshold=0.5,
-            debug_output=False,
-            skip_detector=skip_ocr_detector
+        self.ocr_iface = (
+            ocr_runtime
+            if ocr_runtime is not None
+            else get_ocr_model(
+                model_type="easyocr",
+                gpu=torch.cuda.is_available() if gpu is None else gpu,
+                lang_list=["en"],
+                confidence_threshold=0.5,
+                debug_output=False,
+                skip_detector=skip_ocr_detector,
+            )
         )
-        
+        self.scene_mode = hasattr(self.ocr_iface, "recognize_regions")
+        self.exact_cache_regions = set(exact_cache_regions or [])
+        self.exact_change_regions = set(
+            self.exact_cache_regions
+            if exact_change_regions is None
+            else exact_change_regions
+        )
+        self.exact_cache_map = {}
+        self.exact_prediction_cache = {}
+        self.exact_prediction_cache_hits = 0
+        self.scene_decisions = {}
+        self.review_results = []
+        self.review_last_by_region = {}
+        self.scene_frame_size = scene_frame_size
+
         # State containers
         self.prev_bins: Dict[str, Optional[np.ndarray]] = {}
         self.prev_active_states: Dict[str, bool] = {}
-        self.cache_map: Dict[str, List[Tuple[np.ndarray, int]]] = {} # for multi-digit groups
+        self.cache_map: Dict[
+            str, List[Tuple[np.ndarray, int]]
+        ] = {}  # for multi-digit groups
         # debounce state (stable_frames > 0)
         self.pending_change: Dict[str, bool] = {}
         self.stable_count: Dict[str, int] = {}
         # 值層級去重：每區域最後一次辨識出的文字（deactivate 時重置）
         # 像素變化觸發 OCR 後，若辨識結果與上一筆相同則併入前筆，不產生新紀錄
         self.last_text: Dict[str, Optional[str]] = {}
-        
+
         # Results containers
         self.multi_digit_groups: Dict[str, List[Dict]] = {}
         self.single_digit_results: Dict[str, List[Dict]] = {}
-        
+
         # Stats
         self.stats: Dict[str, Dict] = {}
 
@@ -109,16 +152,162 @@ class OCRProcessor:
                 self.cache_map[region_name] = []
                 self.multi_digit_groups[region_name] = []
                 self.single_digit_results[region_name] = []
-                self.stats[region_name] = {"ocr_time_total": 0.0, "ocr_count": 0, "change_count": 0}
+                self.stats[region_name] = {
+                    "ocr_time_total": 0.0,
+                    "ocr_count": 0,
+                    "change_count": 0,
+                }
                 self.pending_change[region_name] = False
                 self.stable_count[region_name] = 0
                 self.last_text[region_name] = None
+                self.exact_cache_map[region_name] = OrderedDict()
+                self.exact_prediction_cache[region_name] = OrderedDict()
 
-    def process_frame(self, 
-                      frame_bgr: np.ndarray, 
-                      frame_idx: int, 
-                      roi_config: Dict[str, Tuple[int, int, int, int]],
-                      stage_result: Dict[str, Any] = None) -> Dict[str, List[Dict]]:
+    def _recognize(self, image, region, allowlist):
+        cache = (
+            self.exact_prediction_cache.get(region)
+            if region in self.exact_cache_regions
+            else None
+        )
+        key = (
+            (
+                image.shape,
+                image.dtype.str,
+                hashlib.sha256(image.tobytes()).digest(),
+                allowlist,
+            )
+            if cache is not None
+            else None
+        )
+        if cache is not None and key in cache:
+            text, confidence, decision = cache[key]
+            cache.move_to_end(key)
+            self.ocr_iface.last_decision = dict(decision)
+            self.ocr_iface.last_call_count = 0
+            self.exact_prediction_cache_hits += 1
+            return text, confidence
+        if hasattr(self.ocr_iface, "recognize_region"):
+            self.ocr_iface.last_call_count = 1
+            result = self.ocr_iface.recognize_region(image, region, allowlist)
+        else:
+            result = self.ocr_iface.recognize(image, allowlist=allowlist)
+        if cache is not None:
+            cache[key] = (*result, dict(getattr(self.ocr_iface, "last_decision", {})))
+            if len(cache) > 8192:
+                cache.popitem(last=False)
+        return result
+
+    def _cache_result(self, region, image, group_index):
+        if region in self.exact_cache_regions:
+            key = hashlib.sha256(image.tobytes()).digest()
+            cache = self.exact_cache_map[region]
+            cache[key] = group_index
+            cache.move_to_end(key)
+            if len(cache) > 1024:
+                cache.popitem(last=False)
+        else:
+            self.cache_map[region].append((image, group_index))
+
+    def _process_scene_frame(self, frame_bgr, frame_idx, roi_config):
+        """Every decoded frame is eligible; RGB-identical crops alone reuse inference."""
+        if self.scene_frame_size and list(frame_bgr.shape[1::-1]) != list(
+            self.scene_frame_size
+        ):
+            raise ValueError(
+                f"Machine-3 ROI layout expects {self.scene_frame_size}, got {list(frame_bgr.shape[1::-1])}; calibrate the layout before analysis"
+            )
+        crops, decisions = {}, {}
+        for region, (x1, y1, x2, y2) in roi_config.items():
+            if not (
+                0 <= x1 < x2 <= frame_bgr.shape[1]
+                and 0 <= y1 < y2 <= frame_bgr.shape[0]
+            ):
+                raise ValueError(f"Scene OCR ROI outside decoded frame: {region}")
+            crop = frame_bgr[y1:y2, x1:x2]
+            previous = self.prev_bins[region]
+            if previous is not None and np.array_equal(previous, crop):
+                decisions[region] = self.scene_decisions[region]
+            else:
+                crops[region] = crop
+            self.prev_bins[region] = crop.copy()
+        started = time.perf_counter()
+        inferred = self.ocr_iface.recognize_regions(crops)
+        elapsed = time.perf_counter() - started
+        decisions.update(inferred)
+        self.scene_decisions.update(inferred)
+        new_results = {}
+        for region, decision in decisions.items():
+            if region in crops:
+                self.stats[region]["ocr_count"] += 1
+                self.stats[region]["ocr_time_total"] += elapsed / len(crops)
+            text = decision["text"]
+            if decision["needs_review"]:
+                previous_review = self.review_last_by_region.get(region)
+                if (
+                    previous_review is not None
+                    and previous_review["raw_text"] == decision["raw_text"]
+                    and previous_review["end_frame"] == frame_idx - 1
+                ):
+                    previous_review["end_frame"] = frame_idx
+                else:
+                    row = {
+                        "region": region,
+                        "frame": frame_idx,
+                        "end_frame": frame_idx,
+                        **decision,
+                    }
+                    self.review_results.append(row)
+                    self.review_last_by_region[region] = row
+            else:
+                self.review_last_by_region[region] = None
+            if not text:
+                if self.last_text[region] is not None:
+                    event = {
+                        "type": "deactivate",
+                        "frame": frame_idx,
+                        "ocr_text": "(Deactivated)",
+                        "confidence": decision["confidence"],
+                        "setting": False,
+                        "ocr_source": decision["source"],
+                        "needs_review": decision["needs_review"],
+                    }
+                    self.single_digit_results[region].append(event)
+                    new_results[region] = [event]
+                    self.stats[region]["change_count"] += 1
+                self.last_text[region] = None
+                self.prev_active_states[region] = False
+                continue
+            groups = self.multi_digit_groups[region]
+            if self.last_text[region] == text:
+                groups[-1]["last_observed_frame"] = frame_idx
+                groups[-1]["observed_frame_count"] += 1
+            else:
+                event = {
+                    "type": "multi_digit_group",
+                    "source_frame": frame_idx,
+                    "ocr_text": text,
+                    "confidence": decision["confidence"],
+                    "matched_frames": [frame_idx],
+                    "last_observed_frame": frame_idx,
+                    "observed_frame_count": 1,
+                    "setting": True,
+                    "ocr_source": decision["source"],
+                    "needs_review": decision["needs_review"],
+                }
+                groups.append(event)
+                new_results[region] = [event]
+                self.stats[region]["change_count"] += 1
+            self.last_text[region] = text
+            self.prev_active_states[region] = True
+        return new_results
+
+    def process_frame(
+        self,
+        frame_bgr: np.ndarray,
+        frame_idx: int,
+        roi_config: Dict[str, Tuple[int, int, int, int]],
+        stage_result: Dict[str, Any] = None,
+    ) -> Dict[str, List[Dict]]:
         """
         Process a single frame: crop ROIs -> binarize -> diff check -> OCR.
         Returns new OCR results found in this frame.
@@ -127,20 +316,25 @@ class OCRProcessor:
         if not self.prev_bins:
             self.initialize_regions(roi_config)
 
-        new_results = {} # { region_name: [result_dict, ...] }
-        
+        if self.scene_mode:
+            return self._process_scene_frame(frame_bgr, frame_idx, roi_config)
+
+        new_results = {}  # { region_name: [result_dict, ...] }
+
         current_stage_pattern = -1
         if stage_result and "STAGE" in stage_result:
             current_stage_pattern = stage_result["STAGE"].get("pattern_id", -1)
-            if current_stage_pattern is None: 
+            if current_stage_pattern is None:
                 current_stage_pattern = -1
 
         for region_name, coords in roi_config.items():
             # Removed per-frame initialize_region call
-            
+
             # 1. Active Check (Simplified for single-pass)
-            is_active = self._check_active(region_name, frame_idx, current_stage_pattern, frame_bgr)
-            
+            is_active = self._check_active(
+                region_name, frame_idx, current_stage_pattern, frame_bgr
+            )
+
             # Handle Deactivation Event
             prev_active = self.prev_active_states.get(region_name)
             if prev_active is True and is_active is False:
@@ -149,7 +343,7 @@ class OCRProcessor:
                     "frame": frame_idx,
                     "ocr_text": "(Deactivated)",
                     "confidence": 1.0,
-                    "setting": False
+                    "setting": False,
                 }
                 self.single_digit_results[region_name].append(deact_res)
                 self.stats[region_name]["change_count"] += 1
@@ -157,9 +351,9 @@ class OCRProcessor:
                 self.last_text[region_name] = None
                 # if region_name not in new_results: new_results[region_name] = []
                 # new_results[region_name].append(deact_res)
-            
+
             self.prev_active_states[region_name] = is_active
-            
+
             if not is_active:
                 continue
 
@@ -167,11 +361,12 @@ class OCRProcessor:
             x1, y1, x2, y2 = coords
             try:
                 roi_bgr = frame_bgr[y1:y2, x1:x2]
-                if roi_bgr.size == 0: continue
+                if roi_bgr.size == 0:
+                    continue
                 curr_bin = binarize(roi_bgr)
             except Exception:
                 continue
-            
+
             # 3. Diff Check
             prev_bin = self.prev_bins.get(region_name)
             change = False
@@ -179,7 +374,13 @@ class OCRProcessor:
                 change = True
             else:
                 diff = calculate_average_binary_diff(prev_bin, curr_bin)
-                change = diff >= self.diff_threshold
+                change = (
+                    diff > 0
+                    if region_name in self.exact_change_regions
+                    else diff >= self.diff_threshold
+                )
+            if region_name in self.exact_cache_regions and prev_active is False:
+                change = True
 
             # Update State
             self.prev_bins[region_name] = curr_bin
@@ -192,7 +393,9 @@ class OCRProcessor:
                     self.stable_count[region_name] = 0
                     change = False
                 elif self.pending_change.get(region_name):
-                    self.stable_count[region_name] = self.stable_count.get(region_name, 0) + 1
+                    self.stable_count[region_name] = (
+                        self.stable_count.get(region_name, 0) + 1
+                    )
                     if self.stable_count[region_name] >= self.stable_frames:
                         self.pending_change[region_name] = False
                         change = True
@@ -200,17 +403,36 @@ class OCRProcessor:
             if change:
                 self.stats[region_name]["change_count"] += 1
                 t1 = time.perf_counter()
-                
+
                 from_cache = False
                 ocr_calls = 0
-                
+
                 # OCR Logic
                 custom_allowlist = self.char_sets_dict.get(region_name)
                 is_multi_digit = not is_single_digit(curr_bin)
-                
+
                 found_res = None
-                
-                if is_multi_digit:
+
+                if is_multi_digit and region_name in self.exact_cache_regions:
+                    key = hashlib.sha256(curr_bin.tobytes()).digest()
+                    group_index = self.exact_cache_map[region_name].get(key)
+                    if group_index is not None:
+                        groups = self.multi_digit_groups[region_name]
+                        group = groups[group_index]
+                        if self.last_text.get(region_name) != group["ocr_text"]:
+                            group = {
+                                **group,
+                                "source_frame": frame_idx,
+                                "matched_frames": [frame_idx],
+                            }
+                            groups.append(group)
+                            self.exact_cache_map[region_name][key] = len(groups) - 1
+                            found_res = group
+                        else:
+                            groups[-1]["matched_frames"].append(frame_idx)
+                        self.last_text[region_name] = group["ocr_text"]
+                        from_cache = True
+                elif is_multi_digit:
                     for cached_bin, group_index in self.cache_map[region_name]:
                         if calculate_average_binary_diff(curr_bin, cached_bin) < 0.01:
                             # Cache Hit
@@ -219,7 +441,7 @@ class OCRProcessor:
                             self.last_text[region_name] = group["ocr_text"]
                             from_cache = True
                             break
-                
+
                 if not from_cache:
                     # 開頭負號偵測：'-' 常被 OCR 誤讀成 '1'，先從輸入裁掉、事後補回
                     minus_prefix = ""
@@ -236,34 +458,63 @@ class OCRProcessor:
                         ocr_img = curr_bin
                     if cut_x > 0:
                         ocr_img = ocr_img[:, cut_x:]
-                    if self.ocr_input == "gray" and self.min_ocr_height and ocr_img.shape[0] < self.min_ocr_height:
+                    if (
+                        self.ocr_input == "gray"
+                        and self.min_ocr_height
+                        and ocr_img.shape[0] < self.min_ocr_height
+                    ):
                         scale = self.min_ocr_height / ocr_img.shape[0]
-                        ocr_img = cv2.resize(ocr_img, None, fx=scale, fy=scale,
-                                             interpolation=cv2.INTER_CUBIC)
+                        ocr_img = cv2.resize(
+                            ocr_img,
+                            None,
+                            fx=scale,
+                            fy=scale,
+                            interpolation=cv2.INTER_CUBIC,
+                        )
 
                     # 優化：直接傳入 numpy array，省去 PIL 轉換
-                    ocr_result, conf = self.ocr_iface.recognize(ocr_img, allowlist=custom_allowlist)
-                    ocr_calls += 1
+                    ocr_result, conf = self._recognize(
+                        ocr_img, region_name, custom_allowlist
+                    )
+                    ocr_calls += getattr(self.ocr_iface, "last_call_count", 1)
 
-                    if not ocr_result and self.ocr_input != "gray":
+                    if (
+                        not ocr_result
+                        and self.ocr_input != "gray"
+                        and not getattr(self.ocr_iface, "handles_retries", False)
+                    ):
                         trimmed = trim_black_borders(curr_bin, max_border=1)
                         if trimmed.size > 0 and trimmed.shape != curr_bin.shape:
-                             ocr_result, conf = self.ocr_iface.recognize(trimmed, allowlist=custom_allowlist)
-                             ocr_calls += 1
+                            ocr_result, conf = self._recognize(
+                                trimmed, region_name, custom_allowlist
+                            )
+                            ocr_calls += 1
 
                     if ocr_result:
                         if minus_prefix and not ocr_result.startswith("-"):
                             ocr_result = minus_prefix + ocr_result
-                        ocr_result = _apply_value_format(ocr_result, self.value_formats.get(region_name))
-                    
+                        ocr_result = _apply_value_format(
+                            ocr_result, self.value_formats.get(region_name)
+                        )
+                    decision = getattr(self.ocr_iface, "last_decision", {})
+                    if decision.get("needs_review"):
+                        self.review_results.append(
+                            {"region": region_name, "frame": frame_idx, **decision}
+                        )
+
                     if is_multi_digit:
                         if ocr_result:
                             groups = self.multi_digit_groups[region_name]
-                            if (self.last_text.get(region_name) == ocr_result
-                                    and groups and groups[-1]["ocr_text"] == ocr_result):
+                            if (
+                                self.last_text.get(region_name) == ocr_result
+                                and groups
+                                and groups[-1]["ocr_text"] == ocr_result
+                            ):
                                 # 值未變（只是像素被背景擾動）：併入前一筆，不產生新紀錄
                                 groups[-1]["matched_frames"].append(frame_idx)
-                                self.cache_map[region_name].append((curr_bin, len(groups) - 1))
+                                self._cache_result(
+                                    region_name, curr_bin, len(groups) - 1
+                                )
                             else:
                                 new_group = {
                                     "type": "multi_digit_group",
@@ -271,33 +522,48 @@ class OCRProcessor:
                                     "ocr_text": ocr_result,
                                     "confidence": conf,
                                     "matched_frames": [frame_idx],
-                                    "setting": True
+                                    "setting": True,
                                 }
                                 groups.append(new_group)
-                                self.cache_map[region_name].append((curr_bin, len(groups) - 1))
+                                self._cache_result(
+                                    region_name, curr_bin, len(groups) - 1
+                                )
                                 found_res = new_group
                             self.last_text[region_name] = ocr_result
                     else:
                         # 空結果或與上一筆相同的值：不記錄（去重）
                         if ocr_result and ocr_result != self.last_text.get(region_name):
-                            is_setting = _determine_if_setting_value(ocr_result, curr_bin, region_name, frame_idx)
+                            is_setting = _determine_if_setting_value(
+                                ocr_result, curr_bin, region_name, frame_idx
+                            )
                             res = {
                                 "type": "single_digit",
                                 "frame": frame_idx,
                                 "ocr_text": ocr_result,
                                 "confidence": conf,
-                                "setting": is_setting
+                                "setting": is_setting,
                             }
                             self.single_digit_results[region_name].append(res)
                             found_res = res
                         if ocr_result:
                             self.last_text[region_name] = ocr_result
 
-                self.stats[region_name]["ocr_time_total"] += (time.perf_counter() - t1)
+                self.stats[region_name]["ocr_time_total"] += time.perf_counter() - t1
                 self.stats[region_name]["ocr_count"] += ocr_calls
-                
+
                 if found_res:
-                    if region_name not in new_results: new_results[region_name] = []
+                    decision = getattr(self.ocr_iface, "last_decision", {})
+                    if decision and not from_cache:
+                        found_res.update(
+                            {
+                                "ocr_source": decision.get("source"),
+                                "needs_review": decision.get("needs_review", False),
+                                "baseline_text": decision.get("baseline_text"),
+                                "candidate_text": decision.get("candidate_text"),
+                            }
+                        )
+                    if region_name not in new_results:
+                        new_results[region_name] = []
                     new_results[region_name].append(found_res)
 
         return new_results
@@ -305,39 +571,59 @@ class OCRProcessor:
     def _check_active(self, region_name, frame_idx, current_stage_pattern, frame_bgr):
         # 1. Check Header
         if self.roi_header_dict and frame_bgr is not None:
-             if not _is_active_header(frame_bgr, region_name, self.roi_header_dict, frame_idx,
-                                      template_dir=str(self.header_template_dir)):
-                 return False
-                 
+            if not _is_active_header(
+                frame_bgr,
+                region_name,
+                self.roi_header_dict,
+                frame_idx,
+                template_dir=str(self.header_template_dir),
+            ):
+                return False
+
         # 2. Check Stage Config
-        if not self.stage_activation_dict: return True
-        if region_name not in self.stage_activation_dict: return True
+        if not self.stage_activation_dict:
+            return True
+        if region_name not in self.stage_activation_dict:
+            return True
         active_stages = self.stage_activation_dict[region_name]
-        if not active_stages: return True
-        
+        if not active_stages:
+            return True
+
         return current_stage_pattern in active_stages
 
     def save_results(self, save_dir: Path):
         """Dump all accumulated results to jsonl files"""
         save_dir.mkdir(parents=True, exist_ok=True)
-        
-        for region_name, _ in self.single_digit_results.items(): # Iterate known regions
+        if self.scene_mode or self.exact_cache_regions:
+            with (save_dir / "ocr_review.jsonl").open("w", encoding="utf-8") as review:
+                for row in self.review_results:
+                    review.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+        for (
+            region_name,
+            _,
+        ) in self.single_digit_results.items():  # Iterate known regions
             # Combine
             groups = self.multi_digit_groups.get(region_name, [])
             singles = self.single_digit_results.get(region_name, [])
-            
-            if not groups and not singles:
+
+            if (
+                not groups
+                and not singles
+                and not (self.scene_mode or self.exact_cache_regions)
+            ):
                 continue
-                
+
             all_results = groups + singles
             all_results.sort(key=lambda r: r.get("source_frame", r.get("frame", 0)))
-            
+
             save_path = save_dir / f"{region_name}_ocr_testing.jsonl"
             with open(save_path, "w", encoding="utf-8") as f:
                 for rec in all_results:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            
+
             # print(f"[OCR] Saved {len(all_results)} results to {save_path.name}")
+
 
 def _detect_leading_minus(binary: np.ndarray) -> Tuple[bool, int]:
     """偵測二值圖最左側是否為負號橫槓。
@@ -358,8 +644,7 @@ def _detect_leading_minus(binary: np.ndarray) -> Tuple[bool, int]:
     x, y, w, h, _area = first
     img_h = binary.shape[0]
     y_center = y + h / 2.0
-    is_minus = (h <= 0.45 * digit_h and w >= h and
-                0.25 * img_h < y_center < 0.75 * img_h)
+    is_minus = h <= 0.45 * digit_h and w >= h and 0.25 * img_h < y_center < 0.75 * img_h
     if is_minus:
         return True, int(x + w + 1)
     return False, 0
@@ -384,8 +669,11 @@ def _apply_value_format(text: str, fmt: Optional[Dict]) -> str:
 
 _HEADER_TEMPLATE_DIR = Path("data/roi_img_caches/machine_1_2/roi_headers")
 
+
 @lru_cache(maxsize=None)
-def _load_header_template(region_name: str, template_dir: Optional[str] = None) -> Optional[np.ndarray]:
+def _load_header_template(
+    region_name: str, template_dir: Optional[str] = None
+) -> Optional[np.ndarray]:
     base = Path(template_dir) if template_dir else _HEADER_TEMPLATE_DIR
     cache_path = base / f"{region_name}.png"
     if not cache_path.exists():
@@ -406,7 +694,7 @@ def _is_active_header(
     roi_header_dict: Dict[str, List[int]] | None,
     frame_idx: int = 0,
     diff_threshold: float = 0.2,
-    template_dir: Optional[str] = None
+    template_dir: Optional[str] = None,
 ) -> bool:
     """
     檢查指定region的header是否在當前frame中active（與快取圖像匹配）
@@ -447,21 +735,24 @@ def _is_active_header(
     diff_ratio = calculate_average_binary_diff(cached_header, current_header)
     return diff_ratio < diff_threshold
 
+
 def _active_in_stage(
-    stage_analysis_dict: Dict[str, List[Dict[str, Any]]] | None, # stage_analysis.json
+    stage_analysis_dict: Dict[str, List[Dict[str, Any]]] | None,  # stage_analysis.json
     stage_activation_dict: Dict[str, List[int]] | None,
     roi_header_dict: Dict[str, List[int]] | None,
     frame_idx: int,
     region_name: str,
-    current_frame: np.ndarray | None = None  # 新增：當前幀數據
+    current_frame: np.ndarray | None = None,  # 新增：當前幀數據
 ) -> bool:
     """Check if OCR should be active for the given frame and region based on stage config and header cache img"""
 
     # Header檢測（如果有frame數據和header配置）
     if current_frame is not None and roi_header_dict:
-        if not _is_active_header(current_frame, region_name, roi_header_dict, frame_idx):
+        if not _is_active_header(
+            current_frame, region_name, roi_header_dict, frame_idx
+        ):
             return False  # Header not active means always inactive
-    
+
     if not stage_activation_dict:
         return True  # No config is considered as always active
 
@@ -471,71 +762,73 @@ def _active_in_stage(
     active_stages = stage_activation_dict[region_name]
     if not active_stages:
         return True  # Empty list is considered as always active!
-    
-    current_stage = -1 
-    segment_dict = stage_analysis_dict.get("regions", {}).get("STAGE") if stage_analysis_dict else None
+
+    current_stage = -1
+    segment_dict = (
+        stage_analysis_dict.get("regions", {}).get("STAGE")
+        if stage_analysis_dict
+        else None
+    )
     # 若沒有 stage 分析結果或缺少 STAGE 區段，視為總是啟用
     if not segment_dict:
         return True
-    
+
     for stage_segment in segment_dict:
         start_frame = stage_segment.get("start_frame")
         if start_frame is not None and frame_idx < start_frame:
             break
         current_stage = stage_segment.get("pattern", -1)
-        
-    if current_stage in active_stages: 
-        return True 
-    return False # No matched stage segments means always none active
+
+    if current_stage in active_stages:
+        return True
+    return False  # No matched stage segments means always none active
+
 
 def _determine_if_setting_value(
-    ocr_text: str, 
-    binary_image: np.ndarray, 
-    region_name: str, 
-    frame_idx: int
+    ocr_text: str, binary_image: np.ndarray, region_name: str, frame_idx: int
 ) -> bool:
     """
     判斷單一數值的情況下是否為設定值
     """
     # 載入配置
     config = load_setting_regions_config()
-    
+
     # 檢查是否需要進行設定值檢測
     regions_with_detection = config.get("regions_with_setting_detection", [])
     if region_name not in regions_with_detection:
         return config.get("default_setting_value", False)
-    
+
     # 取得檢測配置
     detection_config = config.get("detection_config", {})
     sub_coords = detection_config.get("sub_region_coords", {})
     threshold = detection_config.get("white_pixel_threshold", 0.02)
-    
+
     # 檢查子區域座標配置
     if not all(key in sub_coords for key in ["x1", "x2", "y1", "y2"]):
         return config.get("default_setting_value", False)
-    
+
     # 取得子區域座標
     x1, x2 = sub_coords["x1"], sub_coords["x2"]
     y1, y2 = sub_coords["y1"], sub_coords["y2"]
-    
+
     # 檢查座標是否在圖像範圍內
     h, w = binary_image.shape[:2]
     if x2 > w or y2 > h or x1 < 0 or y1 < 0:
         return config.get("default_setting_value", False)
-    
+
     # 裁切子區域
     sub_region = binary_image[y1:y2, x1:x2]
     if sub_region.size == 0:
         return config.get("default_setting_value", False)
-    
+
     # 計算白色像素比例
     white_pixels = np.sum(sub_region > 0)
     total_pixels = sub_region.size
     white_ratio = white_pixels / total_pixels if total_pixels > 0 else 0
-    
+
     # 判斷：白色比例超過閾值則為運作值（大數字），否則為設定值（小數字）
     is_operation_value = white_ratio > threshold
-    
+
     return not is_operation_value  # 返回 True 表示設定值，False 表示運作值
 
 
@@ -547,7 +840,7 @@ def process_video(
     stage_activation_dict: Dict[str, List[int]] | None = None,
     roi_header_dict: Dict[str, List[int]] | None = None,
     char_sets_dict: Dict[str, str] | None = None,
-    force: bool = False
+    force: bool = False,
 ) -> None:
     """
     Legacy CLI function: processes video file by file (Dual-Pass like).
@@ -556,7 +849,7 @@ def process_video(
     if not save_dir:
         save_dir = resolve_video_analysis_dir(video_path)
     save_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if not force:
         all_exist = True
         for region_name, _ in rois:
@@ -568,7 +861,7 @@ def process_video(
             print(f"⏩ 已存在所有 OCR 結果且未指定 --force，跳過: {video_path.name}")
             return
 
-    stage_analysis_dict = get_stage_analysis_json( save_dir / "stage_analysis.json")
+    stage_analysis_dict = get_stage_analysis_json(save_dir / "stage_analysis.json")
 
     if not char_sets_dict:
         char_sets_dict = {}
@@ -577,31 +870,31 @@ def process_video(
     ocr_iface = get_ocr_model(
         model_type="easyocr",
         gpu=torch.cuda.is_available(),
-        lang_list=['en'],
+        lang_list=["en"],
         confidence_threshold=0.5,
-        debug_output=False
+        debug_output=False,
     )
-    
+
     # 為每個ROI區域維護獨立的狀態
     prev_bins = {}  # type: Dict[str, np.ndarray | None]
     prev_active_states = {}  # type: Dict[str, bool | None] # 追蹤前一幀的activate狀態
-    
+
     # 用於分組結果的新數據結構
     multi_digit_groups = {region_name: [] for region_name, _ in rois}
     single_digit_results = {region_name: [] for region_name, _ in rois}
-    cache_map = {region_name: [] for region_name, _ in rois} # type: Dict[str, List[Tuple[np.ndarray, int]]]
+    cache_map = {region_name: [] for region_name, _ in rois}  # type: Dict[str, List[Tuple[np.ndarray, int]]]
 
     stats = {
         region_name: {"ocr_time_total": 0.0, "ocr_count": 0, "change_count": 0}
         for region_name, _ in rois
     }
-    
+
     t0 = time.perf_counter()
 
     # 以 ROI 提供者 API 迭代，統一取得 rois_data
     frame_provider = iterate_roi_binary_from_cache(video_path, rois)
     meta = get_video_meta(video_path)
-    total_hint = meta.get('total_frames', 0) or None
+    total_hint = meta.get("total_frames", 0) or None
     pbar = tqdm(total=total_hint, desc=f"分析 {video_path.name}", unit="frame")
     total_frames = 0
 
@@ -612,25 +905,34 @@ def process_video(
         for region_name, roi_data in rois_data.items():
             curr_bin = roi_data["binary_np"]
             prev_bin = prev_bins.get(region_name)
-            
+
             # 檢查當前幀的activate狀態
-            current_active = _active_in_stage(stage_analysis_dict, stage_activation_dict, roi_header_dict, frame_idx, region_name, None)
+            current_active = _active_in_stage(
+                stage_analysis_dict,
+                stage_activation_dict,
+                roi_header_dict,
+                frame_idx,
+                region_name,
+                None,
+            )
             prev_active = prev_active_states.get(region_name)
-            
+
             # 檢測 activate → deactivate 轉換
             if prev_active is True and current_active is False:
-                single_digit_results[region_name].append({
-                    "type": "deactivate",
-                    "frame": frame_idx,
-                    "ocr_text": "(Deactivated)",
-                    "confidence": 1.0,
-                    "setting": False  # deactivate事件不是設定值
-                })
+                single_digit_results[region_name].append(
+                    {
+                        "type": "deactivate",
+                        "frame": frame_idx,
+                        "ocr_text": "(Deactivated)",
+                        "confidence": 1.0,
+                        "setting": False,  # deactivate事件不是設定值
+                    }
+                )
                 stats[region_name]["change_count"] += 1
-            
+
             prev_bins[region_name] = curr_bin
             prev_active_states[region_name] = current_active
-            
+
             if not current_active:
                 continue
 
@@ -644,32 +946,38 @@ def process_video(
             if change:
                 stats[region_name]["change_count"] += 1
                 t1 = time.perf_counter()
-                
+
                 from_cache = False
                 ocr_calls_in_frame = 0
 
                 # --- Step 1: 判斷是否為多數字組合並嘗試從快取查找 ---
                 is_multi_digit = not is_single_digit(curr_bin)
-                
+
                 if is_multi_digit:
                     for cached_bin, group_index in cache_map[region_name]:
                         if calculate_average_binary_diff(curr_bin, cached_bin) < 0.01:
-                            multi_digit_groups[region_name][group_index]["matched_frames"].append(frame_idx)
+                            multi_digit_groups[region_name][group_index][
+                                "matched_frames"
+                            ].append(frame_idx)
                             from_cache = True
                             break
 
                 # --- Step 2: 如果不在快取中，則執行OCR ---
                 if not from_cache:
                     custom_allowlist = char_sets_dict.get(region_name)
-                    ocr_result, confidence = ocr_iface.recognize(Image.fromarray(curr_bin), allowlist=custom_allowlist)
+                    ocr_result, confidence = ocr_iface.recognize(
+                        Image.fromarray(curr_bin), allowlist=custom_allowlist
+                    )
                     ocr_calls_in_frame += 1
 
                     if not ocr_result:
                         trimmed_bin = trim_black_borders(curr_bin, max_border=1)
                         if trimmed_bin.size > 0 and trimmed_bin.shape != curr_bin.shape:
-                            ocr_result, confidence = ocr_iface.recognize(Image.fromarray(trimmed_bin), allowlist=custom_allowlist)
+                            ocr_result, confidence = ocr_iface.recognize(
+                                Image.fromarray(trimmed_bin), allowlist=custom_allowlist
+                            )
                             ocr_calls_in_frame += 1
-                    
+
                     # --- Step 3: 記錄新結果 ---
                     if is_multi_digit:
                         if ocr_result:
@@ -679,20 +987,24 @@ def process_video(
                                 "ocr_text": ocr_result,
                                 "confidence": confidence,
                                 "matched_frames": [frame_idx],
-                                "setting": True
+                                "setting": True,
                             }
                             multi_digit_groups[region_name].append(new_group)
                             new_group_index = len(multi_digit_groups[region_name]) - 1
                             cache_map[region_name].append((curr_bin, new_group_index))
-                    else: # 單數字
-                        is_setting_value = _determine_if_setting_value(ocr_result, curr_bin, region_name, frame_idx)
-                        single_digit_results[region_name].append({
-                            "type": "single_digit",
-                            "frame": frame_idx,
-                            "ocr_text": ocr_result,
-                            "confidence": confidence,
-                            "setting": is_setting_value
-                        })
+                    else:  # 單數字
+                        is_setting_value = _determine_if_setting_value(
+                            ocr_result, curr_bin, region_name, frame_idx
+                        )
+                        single_digit_results[region_name].append(
+                            {
+                                "type": "single_digit",
+                                "frame": frame_idx,
+                                "ocr_text": ocr_result,
+                                "confidence": confidence,
+                                "setting": is_setting_value,
+                            }
+                        )
 
                 ocr_elapsed = time.perf_counter() - t1
                 stats[region_name]["ocr_time_total"] += ocr_elapsed
@@ -710,11 +1022,13 @@ def process_video(
         pbar.close()
 
     # --- 保存結果並打印報告 ---
-    print("\n" + "="*20 + f" 分析報告: {video_path.name} " + "="*20)
+    print("\n" + "=" * 20 + f" 分析報告: {video_path.name} " + "=" * 20)
     print(f"總耗時        : {detection_time_total:.2f} 秒")
     print(f"總幀數        : {total_frames}")
-    
-    avg_detection_fps = total_frames / detection_time_total if detection_time_total > 0 else 0
+
+    avg_detection_fps = (
+        total_frames / detection_time_total if detection_time_total > 0 else 0
+    )
     print(f"平均檢測速度  : {avg_detection_fps:.2f} FPS")
 
     for region_name, _ in rois:
@@ -722,47 +1036,88 @@ def process_video(
         ocr_count = stats[region_name]["ocr_count"]
         if change_count == 0:
             continue
-            
+
         save_path = save_dir / f"{region_name}_ocr_testing.jsonl"
-        
+
         # 組合和排序結果
         region_groups = multi_digit_groups[region_name]
         region_singles = single_digit_results[region_name]
         all_results_for_region = region_groups + region_singles
-        all_results_for_region.sort(key=lambda r: r.get("source_frame", r.get("frame", 0)))
+        all_results_for_region.sort(
+            key=lambda r: r.get("source_frame", r.get("frame", 0))
+        )
 
         with open(save_path, "w", encoding="utf-8") as f:
             for rec in all_results_for_region:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        
+
         ocr_time_total = stats[region_name]["ocr_time_total"]
-        avg_change_processing_ms = (ocr_time_total / change_count * 1000) if change_count > 0 else 0
+        avg_change_processing_ms = (
+            (ocr_time_total / change_count * 1000) if change_count > 0 else 0
+        )
 
         print(f"\n--- ROI: {region_name} ---")
-        print(f"  變動幀數       : {change_count} / {total_frames} ({change_count/total_frames:.2f})")
+        print(
+            f"  變動幀數       : {change_count} / {total_frames} ({change_count / total_frames:.2f})"
+        )
         print(f"  實際OCR次數    : {ocr_count}")
         print(f"  平均變動處理耗時: {avg_change_processing_ms:.2f} ms/frame")
         print(f"  結果保存至     : {save_path}")
 
-    print("="* (42 + len(video_path.name)))
+    print("=" * (42 + len(video_path.name)))
 
 
 def parse_args() -> argparse.Namespace:  # pragma: no cover
-    p = argparse.ArgumentParser(description="Binarised ROI frame‑change detection + OCR")
-    p.add_argument("--video", required=True, type=Path, help="Path to video file or video files directory (e.g. mp4)")
-    p.add_argument("--region", default="all", help="ROI name as in ROI config (e.g. region2)")
-    p.add_argument("--roi-config", type=Path, default=Path("config/rois.json"), help="ROI config JSON path")
-    p.add_argument("--stage-config", type=Path, default=Path("config/ocr_activation_stages.json"), help="Stage config JSON path")
-    p.add_argument("--char-config", type=Path, default=Path("config/ocr_char_sets.json"), help="OCR character sets JSON path")
-    p.add_argument("--diff-thresh", type=float, default=0.01, help="Diff ratio threshold (0‑1) to flag change")
-    p.add_argument("--save-dir", type=Path, help="Directory to save jsonl (defaults to video directory)")
-    p.add_argument("--force", action="store_true", help="強制重新分析，忽略已存在的結果檔案")
+    p = argparse.ArgumentParser(
+        description="Binarised ROI frame‑change detection + OCR"
+    )
+    p.add_argument(
+        "--video",
+        required=True,
+        type=Path,
+        help="Path to video file or video files directory (e.g. mp4)",
+    )
+    p.add_argument(
+        "--region", default="all", help="ROI name as in ROI config (e.g. region2)"
+    )
+    p.add_argument(
+        "--roi-config",
+        type=Path,
+        default=Path("config/rois.json"),
+        help="ROI config JSON path",
+    )
+    p.add_argument(
+        "--stage-config",
+        type=Path,
+        default=Path("config/ocr_activation_stages.json"),
+        help="Stage config JSON path",
+    )
+    p.add_argument(
+        "--char-config",
+        type=Path,
+        default=Path("config/ocr_char_sets.json"),
+        help="OCR character sets JSON path",
+    )
+    p.add_argument(
+        "--diff-thresh",
+        type=float,
+        default=0.01,
+        help="Diff ratio threshold (0‑1) to flag change",
+    )
+    p.add_argument(
+        "--save-dir",
+        type=Path,
+        help="Directory to save jsonl (defaults to video directory)",
+    )
+    p.add_argument(
+        "--force", action="store_true", help="強制重新分析，忽略已存在的結果檔案"
+    )
     return p.parse_args()
 
 
 def main():  # pragma: no cover
     args = parse_args()
-    
+
     # 加载全局配置（不依赖视频）
     stage_activation_dict = load_stage_config(args.stage_config)
     char_sets_dict = load_ocr_char_sets_config(args.char_config)
@@ -774,19 +1129,21 @@ def main():  # pragma: no cover
     if args.video.is_dir():
         video_files = list(args.video.glob("*.mp4"))
         for video_file in video_files:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"Processing video: {video_file.name}")
-            print(f"{'='*60}")
-            
+            print(f"{'=' * 60}")
+
             video_name = video_file.stem
             roi_dict = load_roi_config(path=args.roi_config, video_name=video_name)
-            
+
             roi_header_dict = {}
             try:
-                roi_header_dict = load_roi_header_config(path=args.roi_config, video_name=video_name)
+                roi_header_dict = load_roi_header_config(
+                    path=args.roi_config, video_name=video_name
+                )
             except Exception:
                 pass
-            
+
             rois = []
             if args.region == "all":
                 for region in roi_dict:
@@ -794,10 +1151,16 @@ def main():  # pragma: no cover
             else:
                 if args.region in roi_dict:
                     rois = [(args.region, tuple(roi_dict[args.region]))]
-            
+
             process_video(
-                video_file, rois, args.diff_thresh, args.save_dir, 
-                stage_activation_dict, roi_header_dict, char_sets_dict, args.force
+                video_file,
+                rois,
+                args.diff_thresh,
+                args.save_dir,
+                stage_activation_dict,
+                roi_header_dict,
+                char_sets_dict,
+                args.force,
             )
 
     elif str(args.video)[-4:].lower() == ".mp4":
@@ -805,10 +1168,12 @@ def main():  # pragma: no cover
         roi_dict = load_roi_config(path=args.roi_config, video_name=video_name)
         roi_header_dict = {}
         try:
-            roi_header_dict = load_roi_header_config(path=args.roi_config, video_name=video_name)
+            roi_header_dict = load_roi_header_config(
+                path=args.roi_config, video_name=video_name
+            )
         except Exception:
             pass
-        
+
         rois = []
         if args.region == "all":
             for region in roi_dict:
@@ -816,11 +1181,18 @@ def main():  # pragma: no cover
         else:
             if args.region in roi_dict:
                 rois = [(args.region, tuple(roi_dict[args.region]))]
-        
+
         process_video(
-            args.video, rois, args.diff_thresh, args.save_dir, 
-            stage_activation_dict, roi_header_dict, char_sets_dict, args.force
+            args.video,
+            rois,
+            args.diff_thresh,
+            args.save_dir,
+            stage_activation_dict,
+            roi_header_dict,
+            char_sets_dict,
+            args.force,
         )
+
 
 if __name__ == "__main__":  # pragma: no cover
     main()

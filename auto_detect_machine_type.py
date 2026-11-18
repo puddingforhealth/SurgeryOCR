@@ -15,11 +15,10 @@ from PIL import Image
 
 from utils.cv_processing import binarize
 from utils.get_configs import (
-    update_video_machine_mapping, 
+    update_video_machine_mapping,
     get_video_machine_id,
-    load_roi_header_config,
 )
-from utils.get_paths import resolve_video_analysis_dir
+
 
 # --------------------------------------------------------------------------
 # MachineDetector: multi-anchor machine-type detection (config-driven)
@@ -74,12 +73,14 @@ class MachineDetector:
             if template is None:
                 print(f"[MachineDetector] ⚠️ 無法載入錨點樣板: {entry['template']}")
                 continue
-            self.anchors.append({
-                "machine_id": int(entry["machine_id"]),
-                "template": template,
-                "coords": entry["coords"],
-                "diff_threshold": float(entry["diff_threshold"]),
-            })
+            self.anchors.append(
+                {
+                    "machine_id": int(entry["machine_id"]),
+                    "template": template,
+                    "coords": entry["coords"],
+                    "diff_threshold": float(entry["diff_threshold"]),
+                }
+            )
 
         if not self.anchors:
             print("[MachineDetector] ⚠️ 沒有可用的錨點，機型偵測停用")
@@ -116,16 +117,18 @@ class MachineDetector:
         self._last_vote = None
         self._streak = 0
 
+
 # --------------------------------------------------------------------------
 # Original Utilities (Kept for backward compatibility)
 # --------------------------------------------------------------------------
+
 
 def load_stage_analysis(video_dir: Path) -> Optional[dict]:
     """載入視頻目錄下的 stage_analysis.json"""
     stage_file = video_dir / "stage_analysis.json"
     if not stage_file.exists():
         return None
-    
+
     try:
         with open(stage_file, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -137,26 +140,26 @@ def load_stage_analysis(video_dir: Path) -> Optional[dict]:
 def find_pattern2_detection_frame(stage_data: dict, offset: int = 5) -> Optional[int]:
     """
     從 stage_analysis.json 中找到 STAGE 區域 pattern 2 出現後的檢測幀
-    
+
     Returns:
         檢測幀號（start_frame + 5），如果未找到則返回 None
     """
     if "regions" not in stage_data or "STAGE" not in stage_data["regions"]:
         return None
-    
+
     stage_segments = stage_data["regions"]["STAGE"]
-    
+
     # 尋找第一個 pattern 2 的段落
     for segment in stage_segments:
         if segment.get("pattern") == 2:
             start_frame = segment.get("start_frame")
             end_frame = segment.get("end_frame")
-            
+
             if start_frame is not None and end_frame is not None:
                 # 使用 start_frame + offset 作為檢測幀，但確保不超過 end_frame
                 detection_frame = min(start_frame + max(0, int(offset)), end_frame)
                 return detection_frame
-    
+
     return None
 
 
@@ -169,7 +172,7 @@ def extract_frame_from_video(video_path: Path, frame_idx: int) -> Optional[np.nd
         video_dir = video_path
         # 嘗試從父層尋找同名影片
         video_file_candidates = []
-        for ext in ['.mp4', '.MP4', '.avi', '.AVI', '.mov', '.MOV', '.mkv', '.MKV']:
+        for ext in [".mp4", ".MP4", ".avi", ".AVI", ".mov", ".MOV", ".mkv", ".MKV"]:
             video_file_candidates.append(video_dir.parent / f"{video_dir.name}{ext}")
     elif video_path.is_file():
         video_dir = video_path.parent / video_path.stem
@@ -178,7 +181,7 @@ def extract_frame_from_video(video_path: Path, frame_idx: int) -> Optional[np.nd
         # 當作資料夾名處理
         video_dir = video_path
         video_file_candidates = []
-        for ext in ['.mp4', '.MP4', '.avi', '.AVI', '.mov', '.MOV', '.mkv', '.MKV']:
+        for ext in [".mp4", ".MP4", ".avi", ".AVI", ".mov", ".MOV", ".mkv", ".MKV"]:
             video_file_candidates.append(video_dir.parent / f"{video_dir.name}{ext}")
 
     # 1) 優先嘗試 frame_cache 快取
@@ -231,22 +234,24 @@ def save_frame_png(frame_bgr: np.ndarray, out_path: Path) -> bool:
         return False
 
 
-def extract_and_binarize_header(frame_bgr: np.ndarray, header_coords: List[int]) -> Optional[np.ndarray]:
+def extract_and_binarize_header(
+    frame_bgr: np.ndarray, header_coords: List[int]
+) -> Optional[np.ndarray]:
     """
     提取並二值化 header 區域
-    
+
     Args:
         frame_bgr: 完整幀（BGR格式）
         header_coords: header 座標 [x1, y1, x2, y2]
-    
+
     Returns:
         二值化後的圖像（numpy array），失敗返回 None
     """
     if not header_coords or len(header_coords) != 4:
         return None
-    
+
     x1, y1, x2, y2 = header_coords
-    
+
     # 提取 header 區域
     try:
         header_bgr = frame_bgr[y1:y2, x1:x2]
@@ -254,7 +259,7 @@ def extract_and_binarize_header(frame_bgr: np.ndarray, header_coords: List[int])
             return None
     except Exception:
         return None
-    
+
     # 二值化
     try:
         # 與 UI 相同：使用 rule 方法（S%<30 且 gray>150）
@@ -270,102 +275,106 @@ def load_reference_header_image(ref_path: Path) -> Optional[np.ndarray]:
     if not ref_path.exists():
         print(f"  ⚠️  參考圖片不存在: {ref_path}")
         return None
-    
+
     try:
         img = Image.open(ref_path)
         # 轉為灰度或二值化圖（假設參考圖是灰度圖）
         img_array = np.array(img)
-        
+
         # 如果是 RGB，轉為灰度
         if len(img_array.shape) == 3:
             img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-        
+
         # 確保是二值圖（0 或 255）
         _, img_array = cv2.threshold(img_array, 127, 255, cv2.THRESH_BINARY)
-        
+
         return img_array
     except Exception as e:
         print(f"  ⚠️  載入參考圖片失敗: {e}")
         return None
 
 
-def calculate_pixel_difference_ratio(img1: np.ndarray, img2: np.ndarray) -> Optional[float]:
+def calculate_pixel_difference_ratio(
+    img1: np.ndarray, img2: np.ndarray
+) -> Optional[float]:
     """
     計算兩張二值圖的像素差異比例
-    
+
     Returns:
         差異比例（0.0-1.0），例如 0.03 表示 3% 的像素不同
     """
     if img1.shape != img2.shape:
         # print(f"  ⚠️  圖片尺寸不匹配: {img1.shape} vs {img2.shape}")
         return None
-    
+
     # 計算不同像素的數量
     diff_pixels = np.sum(img1 != img2)
     total_pixels = img1.size
-    
+
     diff_ratio = diff_pixels / total_pixels if total_pixels > 0 else 0.0
-    
+
     return diff_ratio
 
 
 def detect_machine_type_for_video(
-    video_name: str, 
-    video_dir: Path, 
+    video_name: str,
+    video_dir: Path,
     data_root: Path = Path("data"),
-    ref_image_path: Path = Path("data/roi_img_caches/machine_1_2/roi_headers/region1.png"),
+    ref_image_path: Path = Path(
+        "data/roi_img_caches/machine_1_2/roi_headers/region1.png"
+    ),
     threshold: float = 0.03,
     verbose: bool = True,
     *,
     debug: bool = False,
     debug_dir: Optional[Path] = None,
     offset: int = 5,
-    save_raw_header_png: bool = True
+    save_raw_header_png: bool = True,
 ) -> Optional[int]:
     """
     檢測單個視頻的機型 (CLI 用, 依賴檔案)
     """
     if verbose:
         print(f"\n🔍 檢測視頻: {video_name}")
-    
+
     # 1. 載入 stage_analysis.json
     stage_data = load_stage_analysis(video_dir)
     if not stage_data:
         if verbose:
-            print(f"  ⚠️  未找到 stage_analysis.json，跳過")
+            print("  ⚠️  未找到 stage_analysis.json，跳過")
         return None
-    
+
     # 2. 找到 pattern 2 的檢測幀
     detection_frame = find_pattern2_detection_frame(stage_data, offset=offset)
     if detection_frame is None:
         # 視為機型2（此機型影片不具備對應的 STAGE 顯示）
         if verbose:
-            print(f"  ⚠️  未找到 STAGE pattern 2，依規則直接判定為機型 2")
+            print("  ⚠️  未找到 STAGE pattern 2，依規則直接判定為機型 2")
         return 2
-    
+
     if verbose:
         print(f"  ℹ️  檢測幀: {detection_frame}")
-    
+
     # 3. 找到視頻文件 (略...使用 helper)
     # 為了簡化，我們直接使用 detector class 來做核心比對，這裡只處理 IO
-    
+
     # 4. 提取檢測幀
     frame_bgr = extract_frame_from_video(video_dir, detection_frame)
     if frame_bgr is None:
         if verbose:
             print(f"  ⚠️  無法從 frame_cache 取得幀 {detection_frame}")
         return None
-    
+
     # 5. 使用多錨點偵測器比對（座標與門檻由 config/machine_identity.json 定義）
     detector = MachineDetector()
     machine_id = detector.detect_from_frame(frame_bgr)
     if machine_id is None:
         # 保留舊行為：偵測幀上所有錨點皆不匹配時視為機型 2
         machine_id = 2
-    
+
     if verbose and machine_id:
         print(f"  ✓  判定機型: {machine_id}")
-    
+
     return machine_id
 
 
@@ -375,106 +384,101 @@ def get_all_video_dirs(data_root: Path = Path("data")) -> List[Tuple[str, Path]]
     """
     if not data_root.exists():
         return []
-    
+
     video_dirs = []
-    
+
     # 遞歸掃描所有子目錄，查找包含分析結果的目錄
     for item in data_root.rglob("*"):
-        if item.is_dir() and not item.name.startswith('.'):
+        if item.is_dir() and not item.name.startswith("."):
             # 排除特殊目錄
-            if item.name in ['roi_img_caches', 'pretrain', 'confusing', 'frame_cache']:
+            if item.name in ["roi_img_caches", "pretrain", "confusing", "frame_cache"]:
                 continue
-            
+
             # 檢查是否為分析目錄（包含 stage_analysis.json 或 frame_cache）
-            if (item / "stage_analysis.json").exists() or \
-               (item / "frame_cache").exists() or \
-               any(item.glob("region*")):
+            if (
+                (item / "stage_analysis.json").exists()
+                or (item / "frame_cache").exists()
+                or any(item.glob("region*"))
+            ):
                 video_dirs.append((item.name, item))
-    
+
     return sorted(video_dirs)
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="自動檢測視頻機型並更新 rois.json",
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    
+
     parser.add_argument(
         "--video",
-        help="指定要檢測的對象：1) 視頻名稱（不含擴展名），或 2) 視頻文件路徑（.mp4 等），或 3) 目錄路徑（掃描該目錄下的已分析視頻目錄）"
+        help="指定要檢測的對象：1) 視頻名稱（不含擴展名），或 2) 視頻文件路徑（.mp4 等），或 3) 目錄路徑（掃描該目錄下的已分析視頻目錄）",
     )
-    
+
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="預覽模式，只檢測不更新 rois.json"
+        "--dry-run", action="store_true", help="預覽模式，只檢測不更新 rois.json"
     )
-    
+
     parser.add_argument(
-        "--force",
-        action="store_true",
-        help="強制重新檢測已有映射的視頻"
+        "--force", action="store_true", help="強制重新檢測已有映射的視頻"
     )
-    
+
     parser.add_argument(
         "--threshold",
         type=float,
         default=0.03,
-        help="像素差異門檻（默認: 0.03，即 3%%）"
+        help="像素差異門檻（默認: 0.03，即 3%%）",
     )
-    
+
     parser.add_argument(
         "--ref-image",
         type=Path,
         default=Path("data/roi_img_caches/machine_1_2/roi_headers/region1.png"),
-        help="參考圖片路徑（機型1標準）"
+        help="參考圖片路徑（機型1標準）",
     )
-    
+
     parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=Path("data"),
-        help="data 根目錄"
+        "--data-root", type=Path, default=Path("data"), help="data 根目錄"
     )
 
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="輸出除錯資訊：儲存二值化 header 與參考圖、列印逐像素相等矩陣"
+        help="輸出除錯資訊：儲存二值化 header 與參考圖、列印逐像素相等矩陣",
     )
 
     parser.add_argument(
         "--debug-dir",
         type=Path,
-        help="指定除錯輸出資料夾（預設: data/roi_img_caches/debug）"
+        help="指定除錯輸出資料夾（預設: data/roi_img_caches/debug）",
     )
 
     parser.add_argument(
         "--offset",
         type=int,
         default=5,
-        help="選擇檢測幀時相對於 STAGE pattern 2 start_frame 的偏移（預設 5）"
+        help="選擇檢測幀時相對於 STAGE pattern 2 start_frame 的偏移（預設 5）",
     )
 
     parser.add_argument(
         "--save-raw-header",
         action="store_true",
-        help="除錯時另外輸出檢測幀的原始 Header 區域 PNG"
+        help="除錯時另外輸出檢測幀的原始 Header 區域 PNG",
     )
-    
+
     args = parser.parse_args()
-    
+
     print("=" * 70)
     print("自動檢測視頻機型")
     print("=" * 70)
-    
+
     # 檢查參考圖片是否存在
     if not args.ref_image.exists():
         print(f"\n❌ 錯誤: 參考圖片不存在: {args.ref_image}")
         print("請確保已運行過視頻標註並保存了 region1 的 header 圖片")
         return
-    
+
     # 獲取要處理的視頻列表
     if args.video:
         candidate_path = Path(args.video)
@@ -490,7 +494,9 @@ def main():
                 video_dir = candidate_path.parent / video_name
                 if not video_dir.exists():
                     print(f"\n❌ 錯誤: 未找到對應的分析目錄: {video_dir}")
-                    print("請先運行階段分析或確認目錄結構為 <data_root>/<視頻名稱>/stage_analysis.json")
+                    print(
+                        "請先運行階段分析或確認目錄結構為 <data_root>/<視頻名稱>/stage_analysis.json"
+                    )
                     return
                 video_list = [(video_name, video_dir)]
             else:
@@ -506,25 +512,25 @@ def main():
     else:
         # 處理所有視頻：掃描 data_root 下的已分析視頻目錄
         video_list = get_all_video_dirs(args.data_root)
-    
+
     if not video_list:
         print("\n⚠️  未找到任何視頻目錄")
         return
-    
+
     print(f"\n找到 {len(video_list)} 個視頻目錄\n")
-    
+
     # 統計
     total = 0
     detected = 0
     updated = 0
     skipped = 0
     failed = 0
-    
+
     results = []
-    
+
     for video_name, video_dir in video_list:
         total += 1
-        
+
         try:
             # 檢查是否已有映射（除非使用 --force）
             if not args.force:
@@ -533,7 +539,7 @@ def main():
                     print(f"⏩ 跳過 {video_name}（已有映射: 機型 {existing_id}）")
                     skipped += 1
                     continue
-            
+
             # 檢測機型
             machine_id = detect_machine_type_for_video(
                 video_name=video_name,
@@ -545,30 +551,30 @@ def main():
                 debug=args.debug,
                 debug_dir=args.debug_dir,
                 offset=args.offset,
-                save_raw_header_png=args.save_raw_header
+                save_raw_header_png=args.save_raw_header,
             )
-            
+
             if machine_id is None:
                 failed += 1
                 continue
-            
+
             detected += 1
             results.append((video_name, machine_id))
-            
+
             # 更新映射（除非是預覽模式）
             if not args.dry_run:
                 success = update_video_machine_mapping(video_name, machine_id)
                 if success:
                     updated += 1
                 else:
-                    print(f"  ⚠️  更新映射失敗")
-        
+                    print("  ⚠️  更新映射失敗")
+
         except Exception as e:
             print(f"\n❌ 處理 {video_name} 時發生錯誤:")
             print(f"   {e}")
             traceback.print_exc()
             failed += 1
-    
+
     # 顯示摘要
     print("\n" + "=" * 70)
     print("檢測摘要")
@@ -577,17 +583,17 @@ def main():
     print(f"成功檢測: {detected}")
     print(f"已跳過: {skipped}")
     print(f"失敗: {failed}")
-    
+
     if not args.dry_run:
         print(f"已更新映射: {updated}")
     else:
         print("\n⚠️  預覽模式：未實際更新 rois.json")
-    
+
     if results:
         print("\n檢測結果:")
         for video_name, machine_id in results:
             print(f"  • {video_name}: 機型 {machine_id}")
-    
+
     print("=" * 70)
 
 

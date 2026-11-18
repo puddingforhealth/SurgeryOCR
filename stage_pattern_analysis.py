@@ -5,28 +5,38 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PIL import Image
 
 from extract_frame_cache import iterate_frames, get_frame_cache_dir
-from utils.get_configs import load_diff_rules, load_pattern_name_mapping, read_surgery_stage_rois
+from utils.get_configs import (
+    load_diff_rules,
+    load_pattern_name_mapping,
+    read_surgery_stage_rois,
+)
 from utils.get_paths import resolve_video_analysis_dir
-from utils.cv_processing import calculate_rmse, calculate_ndarray_diff, binarize
+from utils.cv_processing import (
+    calculate_rmse,
+    calculate_ndarray_diff,
+    binarize,
+    hsv_mask,
+)
 
 # -----------------------------
 # Data structures
 # -----------------------------
 
+
 @dataclass
 class RegionPattern:
     pattern_id: int
-    array: np.ndarray  # reference pattern image (RGB for rgb_gated regions, binary otherwise)
+    array: (
+        np.ndarray
+    )  # reference pattern image (RGB for rgb_gated regions, binary otherwise)
 
 
 @dataclass
@@ -41,10 +51,12 @@ class Segment:
 # Utilities
 # -----------------------------
 
+
 def debug_pause(args: argparse.Namespace, message: str):
     """如果啟用互動模式，則暫停程式"""
     if args.interactive:
         input(f"    └── ⏸️  {message} (按 Enter 繼續)...")
+
 
 def binarize_otsu(image_rgb: np.ndarray) -> np.ndarray:
     """Return a 2D uint8 binary image (0/255) using OTSU on gray."""
@@ -98,7 +110,15 @@ def resolve_match_mode(region_name: str, region_config: Dict) -> str:
     return MATCH_MODE_BINARY
 
 
-def _get_analysis_candidate(roi_input: np.ndarray, region_name: str, region_config: Dict, args: argparse.Namespace, frame_idx: int, input_is_bgr: bool = False, match_mode: Optional[str] = None) -> np.ndarray:
+def _get_analysis_candidate(
+    roi_input: np.ndarray,
+    region_name: str,
+    region_config: Dict,
+    args: argparse.Namespace,
+    frame_idx: int,
+    input_is_bgr: bool = False,
+    match_mode: Optional[str] = None,
+) -> np.ndarray:
     """根據區域配置，從原始ROI中準備用於分析的圖像陣列"""
     analysis_mode = region_config.get("analysis_mode", "full_roi")
     if match_mode is None:
@@ -120,9 +140,11 @@ def _get_analysis_candidate(roi_input: np.ndarray, region_name: str, region_conf
             x1, y1, x2, y2 = sub_coords
             h, w = roi_rgb.shape[:2]
             if x2 > w or y2 > h or x1 < 0 or y1 < 0:
-                print(f"    [{region_name}] 🔴 警告: 精細區域座標 {sub_coords} 超出ROI範圍 {(w, h)}")
+                print(
+                    f"    [{region_name}] 🔴 警告: 精細區域座標 {sub_coords} 超出ROI範圍 {(w, h)}"
+                )
                 return roi_rgb
-            
+
             cand_array = roi_rgb[y1:y2, x1:x2]
             if is_pedal_debug:
                 print(f"    - 裁切後的候選圖像尺寸: {cand_array.shape}")
@@ -133,6 +155,15 @@ def _get_analysis_candidate(roi_input: np.ndarray, region_name: str, region_conf
         # 依 diff_rule 的 "binarize" 選擇方法：
         #   "rule" -> 與 roi_picker 樣板一致的固定規則二值化（機型3）
         #   其他   -> OTSU（機型1/2 樣板的產生方式）
+        #   "hsv_mask" -> 依顏色挑出文字像素（半透明面板上的狀態訊息／AS 圖示）
+        if region_config.get("binarize") == "hsv_mask":
+            roi_bgr = (
+                roi_input
+                if input_is_bgr
+                else cv2.cvtColor(roi_input, cv2.COLOR_RGB2BGR)
+            )
+            return hsv_mask(roi_bgr, region_config.get("hsv_ranges"))
+
         if region_config.get("binarize") == "rule":
             if input_is_bgr:
                 roi_bgr = roi_input
@@ -182,17 +213,17 @@ def _match_best_pattern(
         if is_pedal_debug:
             print(f"    [{region_name}] 🔴 錯誤: 沒有載入任何樣板，無法比對。")
         return None, None
-    
+
     cand_array = cand_array.astype(np.float32, copy=False)
     best_pid: Optional[int] = None
     best_rmse: float = float("inf")
 
     # 優化：將循環不變量移出循環
-    use_sub_roi = (match_mode == MATCH_MODE_RGB_GATED and analysis_mode == "sub_roi")
+    use_sub_roi = match_mode == MATCH_MODE_RGB_GATED and analysis_mode == "sub_roi"
     sub_coords = region_config.get("sub_roi_coords") if use_sub_roi else None
     x1, y1, x2, y2 = (0, 0, 0, 0)
     if sub_coords:
-         x1, y1, x2, y2 = sub_coords
+        x1, y1, x2, y2 = sub_coords
 
     for p in patterns:
         full_ref_array = p.array
@@ -203,20 +234,26 @@ def _match_best_pattern(
                 ref_for_comparison = full_ref_array[y1:y2, x1:x2]
             else:
                 if is_pedal_debug:
-                    print(f"    [{region_name}] 🔴 警告: 樣板 ID {p.pattern_id} (尺寸 {full_ref_array.shape}) 太小，無法使用 sub_roi 座標 {sub_coords} 進行裁切。")
+                    print(
+                        f"    [{region_name}] 🔴 警告: 樣板 ID {p.pattern_id} (尺寸 {full_ref_array.shape}) 太小，無法使用 sub_roi 座標 {sub_coords} 進行裁切。"
+                    )
                 continue
 
         # 優化：內聯 RMSE 計算，減少函數調用開銷
         if ref_for_comparison.shape != cand_array.shape:
             if is_pedal_debug:
-                 print(f"    [DEBUG] 🔴 錯誤: 形狀不匹配! Pattern: {ref_for_comparison.shape}, Cand: {cand_array.shape}")
+                print(
+                    f"    [DEBUG] 🔴 錯誤: 形狀不匹配! Pattern: {ref_for_comparison.shape}, Cand: {cand_array.shape}"
+                )
             rmse = float("inf")
         else:
             rmse = calculate_rmse(ref_for_comparison, cand_array)
 
         if is_pedal_debug:
-            print(f"    - 正在比對樣板 ID: {p.pattern_id} (比對尺寸: {ref_for_comparison.shape}) -> 計算出的 RMSE: {rmse:.4f}")
-        
+            print(
+                f"    - 正在比對樣板 ID: {p.pattern_id} (比對尺寸: {ref_for_comparison.shape}) -> 計算出的 RMSE: {rmse:.4f}"
+            )
+
         if rmse < best_rmse:
             best_rmse = rmse
             best_pid = p.pattern_id
@@ -225,10 +262,12 @@ def _match_best_pattern(
                 break
 
     is_match = best_pid is not None and best_rmse < rmse_threshold
-    
+
     if is_pedal_debug:
         print(f"    - 比對完成。最佳匹配樣板: {best_pid}, 最小 RMSE: {best_rmse:.4f}")
-        print(f"    - 判斷結果: {best_rmse:.4f} < {rmse_threshold} ?  -> {'✅ 匹配成功' if is_match else '❌ 匹配失敗'}")
+        print(
+            f"    - 判斷結果: {best_rmse:.4f} < {rmse_threshold} ?  -> {'✅ 匹配成功' if is_match else '❌ 匹配失敗'}"
+        )
         debug_pause(args, "樣板比對結束")
 
     if is_match:
@@ -238,7 +277,7 @@ def _match_best_pattern(
 
 def build_segments(
     matches: List[Tuple[int, Optional[int], Optional[float]]],
-    pattern_mapping: Dict[str, str]
+    pattern_mapping: Dict[str, str],
 ) -> List[Dict[str, Any]]:
     """
     從幀匹配列表中構建連續的片段。
@@ -252,15 +291,19 @@ def build_segments(
         nonlocal segments, start, current_pattern, rmse_values
         if current_pattern is not None:
             avg_rmse = np.mean(rmse_values) if rmse_values else 0.0
-            pattern_name = pattern_mapping.get(str(current_pattern), f"Pattern {current_pattern}")
-            segments.append({
-                "pattern": current_pattern,
-                "pattern_name": pattern_name,
-                "start_frame": start,
-                "end_frame": end_frame,
-                "avg_rmse": float(avg_rmse),
-                "frame_count": end_frame - start + 1
-            })
+            pattern_name = pattern_mapping.get(
+                str(current_pattern), f"Pattern {current_pattern}"
+            )
+            segments.append(
+                {
+                    "pattern": current_pattern,
+                    "pattern_name": pattern_name,
+                    "start_frame": start,
+                    "end_frame": end_frame,
+                    "avg_rmse": float(avg_rmse),
+                    "frame_count": end_frame - start + 1,
+                }
+            )
             rmse_values = []
 
     for frame_idx, pattern_id, rmse in matches:
@@ -297,6 +340,32 @@ def build_segments(
     return segments
 
 
+def region_segments(
+    matches: List[Tuple[int, Optional[int], Optional[float]]],
+    pattern_mapping: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """Per-frame matches of one region -> the segment list stage_analysis.json stores.
+
+    Sorts by frame, builds segments and normalises their bounds (end >= start,
+    frame_count = end - start + 1). Shared by run_pipeline.py and the region
+    backfill so both write identical segments for identical matches.
+    """
+    if not matches:
+        return []
+    matches = sorted(matches, key=lambda m: m[0])
+    cleaned: List[Dict[str, Any]] = []
+    for seg in build_segments(matches, pattern_mapping):
+        start = int(seg.get("start_frame", 0))
+        end = int(seg.get("end_frame", start))
+        if end < start:
+            end = start
+        seg["start_frame"] = start
+        seg["end_frame"] = end
+        seg["frame_count"] = max(0, end - start + 1)
+        cleaned.append(seg)
+    return cleaned
+
+
 def match_rgb_gated(
     current_roi: np.ndarray,
     prev_roi: Optional[np.ndarray],
@@ -321,44 +390,59 @@ def match_rgb_gated(
     """
     is_pedal_debug = args.debug_pedal
     sub_coords = region_config.get("sub_roi_coords", [20, 13, 26, 19])
-    
+
     # 從配置中獲取兩個不同的閾值
     frame_diff_threshold = region_config.get("diff_threshold", 30.0)  # 前後幀差異門檻
-    cache_hit_threshold = region_config.get("cache_hit_threshold", 40.0)  # cache 匹配門檻
-    
+    cache_hit_threshold = region_config.get(
+        "cache_hit_threshold", 40.0
+    )  # cache 匹配門檻
+
     if is_pedal_debug:
-        print("="*60)
+        print("=" * 60)
         print(f"[{region_name} DEBUG] Frame {frame_idx} | 區域分析開始")
         print(f"    - 當前 ROI 尺寸: {current_roi.shape}")
         print(f"    - 前後幀差異門檻: {frame_diff_threshold}")
         print(f"    - Cache 匹配門檻: {cache_hit_threshold}")
-    
+
     # 第一幀：直接與 cache 比對
     if prev_roi is None or frame_idx == 0:
         if is_pedal_debug:
-            print(f"    - 策略: 第一幀，直接進行 cache 比對")
-        
-        cand_array = _get_analysis_candidate(current_roi, region_name, region_config, args,
-                                             frame_idx, match_mode=MATCH_MODE_RGB_GATED)
+            print("    - 策略: 第一幀，直接進行 cache 比對")
+
+        cand_array = _get_analysis_candidate(
+            current_roi,
+            region_name,
+            region_config,
+            args,
+            frame_idx,
+            match_mode=MATCH_MODE_RGB_GATED,
+        )
         pid, rmse = _match_best_pattern(
-            cand_array, patterns, cache_hit_threshold, args, frame_idx,
-            region_name=region_name, region_config=region_config,
-            match_mode=MATCH_MODE_RGB_GATED
+            cand_array,
+            patterns,
+            cache_hit_threshold,
+            args,
+            frame_idx,
+            region_name=region_name,
+            region_config=region_config,
+            match_mode=MATCH_MODE_RGB_GATED,
         )
         return pid, rmse, len(patterns)
-    
+
     # 後續幀：先計算前後幀差異
     frame_diff = calculate_ndarray_diff(prev_roi, current_roi, sub_coords)
-    
+
     if is_pedal_debug:
         print(f"    - 與前一幀的差異值: {frame_diff:.2f}")
         print(f"    - 前後幀差異門檻: {frame_diff_threshold}")
-        
+
     if frame_diff <= frame_diff_threshold:
         # 差異不大，沿用前一幀的結果
         prev_pid, prev_rmse = prev_match
         if is_pedal_debug:
-            print(f"    - 策略: 差異 ≤ {frame_diff_threshold}，沿用前一幀結果 (Pattern ID: {prev_pid})")
+            print(
+                f"    - 策略: 差異 ≤ {frame_diff_threshold}，沿用前一幀結果 (Pattern ID: {prev_pid})"
+            )
         return prev_pid, prev_rmse, 0
     else:
         # 差異較大，進行 cache 比對
@@ -366,22 +450,37 @@ def match_rgb_gated(
             print(f"    - 策略: 差異 > {frame_diff_threshold}，進行 cache 比對")
             print(f"    - 將使用 cache 匹配門檻: {cache_hit_threshold}")
             debug_pause(args, "即將開始 cache 比對")
-        
-        cand_array = _get_analysis_candidate(current_roi, region_name, region_config, args,
-                                             frame_idx, match_mode=MATCH_MODE_RGB_GATED)
-        pid, rmse = _match_best_pattern(
-            cand_array, patterns, cache_hit_threshold, args, frame_idx,
-            region_name=region_name, region_config=region_config,
-            match_mode=MATCH_MODE_RGB_GATED
+
+        cand_array = _get_analysis_candidate(
+            current_roi,
+            region_name,
+            region_config,
+            args,
+            frame_idx,
+            match_mode=MATCH_MODE_RGB_GATED,
         )
-        
+        pid, rmse = _match_best_pattern(
+            cand_array,
+            patterns,
+            cache_hit_threshold,
+            args,
+            frame_idx,
+            region_name=region_name,
+            region_config=region_config,
+            match_mode=MATCH_MODE_RGB_GATED,
+        )
+
         if is_pedal_debug:
             print(f"    - Cache 比對結果: Pattern ID {pid}, RMSE: {rmse}")
             if pid is not None:
-                print(f"    - ✅ 找到匹配的 Pattern ID {pid} (RMSE {rmse:.2f} < {cache_hit_threshold})")
+                print(
+                    f"    - ✅ 找到匹配的 Pattern ID {pid} (RMSE {rmse:.2f} < {cache_hit_threshold})"
+                )
             else:
-                print(f"    - ❌ 沒有找到匹配的 Pattern (最小 RMSE {rmse:.2f} >= {cache_hit_threshold})")
-        
+                print(
+                    f"    - ❌ 沒有找到匹配的 Pattern (最小 RMSE {rmse:.2f} >= {cache_hit_threshold})"
+                )
+
         return pid, rmse, len(patterns)
 
 
@@ -389,32 +488,45 @@ def match_rgb_gated(
 # [NEW] StageAnalyzer Class for Pipeline Integration
 # --------------------------------------------------------------------------
 class StageAnalyzer:
-    def __init__(self, roi_config_path: Path, cache_dir: Path, debug: bool = False,
-                 diff_rules_path: Optional[Path] = None):
+    def __init__(
+        self,
+        roi_config_path: Path,
+        cache_dir: Path,
+        debug: bool = False,
+        diff_rules_path: Optional[Path] = None,
+        machine_id=None,
+        regions: Optional[List[str]] = None,
+    ):
         self.roi_config_path = roi_config_path
         self.cache_dir = cache_dir
         self.debug = debug
 
-        # 載入配置
-        self.roi_dict = read_surgery_stage_rois(roi_config_path)
+        # 載入配置。machine_id 決定「依機型」的區域（例如 AS 只在機型 2 畫面上）；
+        # regions 可只保留部分區域（補跑新增區域時不重做 STAGE/PEDAL）。
+        self.roi_dict = read_surgery_stage_rois(roi_config_path, machine_id)
+        if regions is not None:
+            self.roi_dict = {r: box for r, box in self.roi_dict.items() if r in regions}
         self.diff_rules = load_diff_rules(diff_rules_path)
-        
+
         # 載入 Patterns
         self.region_to_patterns: Dict[str, List[RegionPattern]] = {
-            region: _load_region_patterns(cache_dir, region) for region in self.roi_dict.keys()
+            region: _load_region_patterns(cache_dir, region)
+            for region in self.roi_dict.keys()
         }
-        
+
         # 每個區域各自的時序狀態：上一幀的裁切，以及上一幀的判定。
         # 以區域為鍵，所以任意數量的區域都能走帶閘門的路徑而不互相污染，
         # 同一支程式也能同時持有多個 analyzer（例如平行處理多支影片）。
-        self.prev_frame_rois: Dict[str, Optional[np.ndarray]] = {r: None for r in self.roi_dict}
+        self.prev_frame_rois: Dict[str, Optional[np.ndarray]] = {
+            r: None for r in self.roi_dict
+        }
         self.prev_matches: Dict[str, Tuple[Optional[int], Optional[float]]] = {
             r: (None, None) for r in self.roi_dict
         }
 
         # [優化] 預先創建 mock_args 對象，避免每幀都創建新對象
         self._mock_args = argparse.Namespace(debug_pedal=debug, interactive=False)
-        
+
         # [優化] 預先計算每個區域的配置和閾值
         # Work counters, reported in run_stats.json. Template comparisons grow with
         # (regions x templates x frames), so this is the number to watch when new
@@ -428,8 +540,13 @@ class StageAnalyzer:
             self._region_configs[region_name] = config
             self._region_thresholds[region_name] = config.get("diff_threshold", 30.0)
             self._region_modes[region_name] = resolve_match_mode(region_name, config)
-    
-    def process_frame(self, frame_bgr: np.ndarray, frame_idx: int, rmse_threshold: Optional[float] = None) -> Dict[str, Dict[str, Any]]:
+
+    def process_frame(
+        self,
+        frame_bgr: np.ndarray,
+        frame_idx: int,
+        rmse_threshold: Optional[float] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         """
         處理單一幀，回傳該幀各區域的匹配結果。
         Returns:
@@ -444,20 +561,26 @@ class StageAnalyzer:
         for region_name, coords in self.roi_dict.items():
             # [優化] 使用預先緩存的配置和閾值
             region_config = self._region_configs[region_name]
-            threshold = rmse_threshold if rmse_threshold is not None else self._region_thresholds[region_name]
+            threshold = (
+                rmse_threshold
+                if rmse_threshold is not None
+                else self._region_thresholds[region_name]
+            )
 
             x1, y1, x2, y2 = map(int, coords)
             h, w = frame_bgr.shape[:2]
-            
+
             # 邊界檢查
             if x2 <= x1 or y2 <= y1 or x1 < 0 or y1 < 0 or x2 > w or y2 > h:
                 if self.debug:
-                    print(f"[警告] ROI 座標無效 {region_name}: {(x1,y1,x2,y2)} 超出畫面範圍 {(w,h)}，跳過")
+                    print(
+                        f"[警告] ROI 座標無效 {region_name}: {(x1, y1, x2, y2)} 超出畫面範圍 {(w, h)}，跳過"
+                    )
                 results[region_name] = {"pattern_id": None, "rmse": None}
                 continue
-                
+
             roi_bgr = frame_bgr[y1:y2, x1:x2]
-            
+
             pid, rmse = None, None
             match_mode = self._region_modes[region_name]
             patterns = self.region_to_patterns.get(region_name, [])
@@ -468,30 +591,48 @@ class StageAnalyzer:
                 roi_rgb = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2RGB)
 
                 pid, rmse, compares = match_rgb_gated(
-                    roi_rgb, self.prev_frame_rois[region_name],
-                    self.prev_matches[region_name], patterns,
-                    region_config, self._mock_args, frame_idx, region_name
+                    roi_rgb,
+                    self.prev_frame_rois[region_name],
+                    self.prev_matches[region_name],
+                    patterns,
+                    region_config,
+                    self._mock_args,
+                    frame_idx,
+                    region_name,
                 )
                 self.template_compares += compares
                 self.prev_matches[region_name] = (pid, rmse)
-                self.prev_frame_rois[region_name] = roi_rgb.copy() # 存 RGB 以供下一幀比較
+                self.prev_frame_rois[region_name] = (
+                    roi_rgb.copy()
+                )  # 存 RGB 以供下一幀比較
 
             else:
                 # 二值路徑：傳入 BGR，由 _get_analysis_candidate 內部轉 Gray -> Binary，省去 RGB 轉換
-                cand_array = _get_analysis_candidate(roi_bgr, region_name, region_config,
-                                                     self._mock_args, frame_idx,
-                                                     input_is_bgr=True, match_mode=match_mode)
+                cand_array = _get_analysis_candidate(
+                    roi_bgr,
+                    region_name,
+                    region_config,
+                    self._mock_args,
+                    frame_idx,
+                    input_is_bgr=True,
+                    match_mode=match_mode,
+                )
                 self.template_compares += len(patterns)
                 if patterns:
                     pid, rmse = _match_best_pattern(
-                        cand_array, patterns, threshold, self._mock_args, frame_idx,
-                        region_name=region_name, region_config=region_config,
-                        match_mode=match_mode
+                        cand_array,
+                        patterns,
+                        threshold,
+                        self._mock_args,
+                        frame_idx,
+                        region_name=region_name,
+                        region_config=region_config,
+                        match_mode=match_mode,
                     )
                 self.prev_matches[region_name] = (pid, rmse)
 
             results[region_name] = {"pattern_id": pid, "rmse": rmse}
-            
+
         return results
 
 
@@ -505,10 +646,10 @@ def analyse_video(
     args: argparse.Namespace,
 ) -> Path:
     """對單一影片進行分析"""
-    
+
     # 使用新的 StageAnalyzer Class
     analyzer = StageAnalyzer(roi_config_path, cache_dir, debug=args.debug_pedal)
-    
+
     # 簡易取得影片資訊
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -516,8 +657,10 @@ def analyse_video(
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     cap.release()
 
-    region_matches: Dict[str, List[Tuple[int, Optional[int], Optional[float]]]] = {r: [] for r in analyzer.roi_dict}
-    
+    region_matches: Dict[str, List[Tuple[int, Optional[int], Optional[float]]]] = {
+        r: [] for r in analyzer.roi_dict
+    }
+
     print(f"🚀 開始逐幀樣板比對分析影片: {video_path.name}")
     if args.debug_pedal:
         print("🕵️  已啟用帶閘門區域（rgb_gated）的偵錯模式。")
@@ -530,7 +673,7 @@ def analyse_video(
     # 優先使用 frame_cache（若存在），否則回退到直接讀取影片
     cache_path = get_frame_cache_dir(video_path)
     cache_has_files = cache_path.exists() and any(cache_path.glob("frame_*.jpg"))
-    
+
     if cache_has_files:
         print(f"[訊息] 使用 frame_cache 來源: {cache_path}")
         frame_source = iterate_frames(video_path)
@@ -538,6 +681,7 @@ def analyse_video(
         # 嘗試從 extract_frame_cache 導入 generator，如果失敗則使用本地簡單邏輯
         try:
             from extract_frame_cache import video_frame_generator
+
             frame_source = video_frame_generator(video_path)
         except ImportError:
             # Fallback: 簡單的 generator
@@ -546,27 +690,31 @@ def analyse_video(
                 i = 0
                 while True:
                     r, f = c.read()
-                    if not r: break
+                    if not r:
+                        break
                     if f is not None and f.size > 0:
                         yield i, f
                     i += 1
                 c.release()
+
             frame_source = simple_gen()
 
     # 統一的處理迴圈
     for frame_idx, frame_bgr in frame_source:
         if args.debug_pedal and frame_idx >= frames_to_process:
             break
-            
+
         if frame_idx > 0 and frame_idx % 1000 == 0:
             print(f"  ... 正在處理幀 {frame_idx}/{total_frames}")
 
         # 使用 Analyzer 處理
         results = analyzer.process_frame(frame_bgr, frame_idx, rmse_threshold)
-        
+
         # 收集結果
         for region_name, res in results.items():
-            region_matches[region_name].append((frame_idx, res['pattern_id'], res['rmse']))
+            region_matches[region_name].append(
+                (frame_idx, res["pattern_id"], res["rmse"])
+            )
 
     print("✅ 逐幀分析完成，開始建立區段...")
 
@@ -575,7 +723,9 @@ def analyse_video(
         # 保險：按 frame_idx 排序，避免任何來源造成的錯序
         matches.sort(key=lambda t: t[0])
         # 使用新的 build_segments 函數
-        region_pattern_map = load_pattern_name_mapping(Path("config/pattern_name_mapping.json")).get(region_name, {})
+        region_pattern_map = load_pattern_name_mapping(
+            Path("config/pattern_name_mapping.json")
+        ).get(region_name, {})
         segments = build_segments(matches, region_pattern_map)
         # 額外防護：修正可能的負 frame_count 與錯位 end/start
         cleaned_segments: List[Dict[str, Any]] = []
@@ -593,7 +743,9 @@ def analyse_video(
         segments = cleaned_segments
         regions_output[region_name] = segments
         non_null = sum(1 for _, pid, _ in matches if pid is not None)
-        print(f"[診斷] 區域 {region_name}: 匹配幀數 {non_null} / {len(matches)}，段落數 {len(segments)}")
+        print(
+            f"[診斷] 區域 {region_name}: 匹配幀數 {non_null} / {len(matches)}，段落數 {len(segments)}"
+        )
 
     video_name = video_path.stem
     if output_dir is None:
@@ -616,16 +768,60 @@ def analyse_video(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Compare ROI of each frame against cached patterns and produce stage analysis JSON")
-    p.add_argument("--video", "--video-path", dest="video", required=True, type=Path, help="影片路徑或資料夾 (.mp4 檔或包含多支影片的資料夾)")
-    p.add_argument("--roi-config", type=Path, default=Path("config/surgery_stage_rois.json"), help="手術階段ROI配置檔")
-    p.add_argument("--cache-dir", type=Path, default=Path("data/roi_img_caches/machine_1_2"), help="各區域快取圖片資料夾根目錄")
-    p.add_argument("--threshold", type=float, default=None, help="全域RMSE門檻值 (若指定，會覆蓋diff_rule.json中的設定)")
-    p.add_argument("--output-dir", type=Path, help="輸出資料夾 (預設: data/<video_name>)；若為資料夾模式將分別輸出至各自的 data/<video_name>/")
-    p.add_argument("--debug-pedal", action="store_true", help="啟用 rgb_gated 模式區域（如機型1/2 的彩色踏板）的詳細偵錯輸出")
-    p.add_argument("--interactive", action="store_true", help="在偵錯模式下啟用互動式暫停 (需搭配 --debug-pedal)")
-    p.add_argument("--force", action="store_true", help="強制重新分析，忽略已存在的 stage_analysis.json")
-    p.add_argument("--use-stream", action="store_true", help="強制使用串流讀取模式 (不依賴 disk cache)")
+    p = argparse.ArgumentParser(
+        description="Compare ROI of each frame against cached patterns and produce stage analysis JSON"
+    )
+    p.add_argument(
+        "--video",
+        "--video-path",
+        dest="video",
+        required=True,
+        type=Path,
+        help="影片路徑或資料夾 (.mp4 檔或包含多支影片的資料夾)",
+    )
+    p.add_argument(
+        "--roi-config",
+        type=Path,
+        default=Path("config/surgery_stage_rois.json"),
+        help="手術階段ROI配置檔",
+    )
+    p.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("data/roi_img_caches/machine_1_2"),
+        help="各區域快取圖片資料夾根目錄",
+    )
+    p.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="全域RMSE門檻值 (若指定，會覆蓋diff_rule.json中的設定)",
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        help="輸出資料夾 (預設: data/<video_name>)；若為資料夾模式將分別輸出至各自的 data/<video_name>/",
+    )
+    p.add_argument(
+        "--debug-pedal",
+        action="store_true",
+        help="啟用 rgb_gated 模式區域（如機型1/2 的彩色踏板）的詳細偵錯輸出",
+    )
+    p.add_argument(
+        "--interactive",
+        action="store_true",
+        help="在偵錯模式下啟用互動式暫停 (需搭配 --debug-pedal)",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="強制重新分析，忽略已存在的 stage_analysis.json",
+    )
+    p.add_argument(
+        "--use-stream",
+        action="store_true",
+        help="強制使用串流讀取模式 (不依賴 disk cache)",
+    )
     return p.parse_args()
 
 
@@ -642,10 +838,14 @@ def main() -> None:
         for idx, vf in enumerate(video_files, start=1):
             print(f"\n[{idx}/{len(video_files)}] 分析影片: {vf.name}")
             # 計算預期輸出路徑，若存在且未指定 --force 則跳過
-            expected_out_dir = args.output_dir if args.output_dir else resolve_video_analysis_dir(vf)
+            expected_out_dir = (
+                args.output_dir if args.output_dir else resolve_video_analysis_dir(vf)
+            )
             expected_out_path = expected_out_dir / "stage_analysis.json"
             if expected_out_path.exists() and not args.force:
-                print(f"⏭️  偵測到已存在: {expected_out_path}，使用 --force 可強制重跑，已跳過。")
+                print(
+                    f"⏭️  偵測到已存在: {expected_out_path}，使用 --force 可強制重跑，已跳過。"
+                )
                 continue
 
             analyse_video(
@@ -661,10 +861,14 @@ def main() -> None:
 
     if str(target).lower().endswith(".mp4"):
         # 計算預期輸出路徑，若存在且未指定 --force 則提示並跳過
-        expected_out_dir = args.output_dir if args.output_dir else resolve_video_analysis_dir(target)
+        expected_out_dir = (
+            args.output_dir if args.output_dir else resolve_video_analysis_dir(target)
+        )
         expected_out_path = expected_out_dir / "stage_analysis.json"
         if expected_out_path.exists() and not args.force:
-            print(f"⏭️  偵測到已存在: {expected_out_path}，使用 --force 可強制重跑，已跳過。")
+            print(
+                f"⏭️  偵測到已存在: {expected_out_path}，使用 --force 可強制重跑，已跳過。"
+            )
             return
 
         analyse_video(

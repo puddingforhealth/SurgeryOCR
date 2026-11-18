@@ -1,0 +1,26 @@
+{
+ "applied": [
+  "claude_md",
+  "claude_settings",
+  "gitattributes",
+  "check_scripts",
+  "doctor_scripts",
+  "changelog",
+  "license",
+  "ci"
+ ],
+ "variant": "python",
+ "at": "2026-11-11T16:08:36+00:00",
+ "added": [
+  "CLAUDE.md",
+  ".claude/settings.json",
+  ".gitattributes",
+  "scripts/check.ps1",
+  "scripts/check.sh",
+  "scripts/doctor.ps1",
+  "scripts/doctor.sh",
+  "CHANGELOG.md",
+  "LICENSE",
+  ".github/workflows/check.yml"
+ ]
+}

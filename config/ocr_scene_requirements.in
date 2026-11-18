@@ -1,0 +1,23 @@
+# Inherits the project's pinned PyTorch installation through system-site-packages.
+rapidocr==3.10.0
+numpy==1.26.4
+opencv-python==4.11.0.86
+opencv-python-headless==4.11.0.86
+onnxruntime==1.25.1
+Pillow==13.0.0
+omegaconf==2.4.0
+PyYAML==6.0.3
+pyclipper==1.4.0
+shapely==2.2.0
+colorlog==6.12.0
+colorama==0.4.6
+requests==2.34.2
+urllib3==2.8.0
+certifi==2026.10.23
+charset-normalizer==3.5.2
+idna==3.20
+tqdm==4.70.1
+six==1.17.0
+flatbuffers==25.12.19
+packaging==26.3
+protobuf==7.36.2

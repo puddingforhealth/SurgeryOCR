@@ -71,3 +71,15 @@ runs/
 
 # Google Cloud SDK downloaded by scripts/setup.sh
 tools/google-cloud-sdk/
+
+# Optional, isolated CPU OCR comparison environment.
+.venv-ocr-benchmark/
+.venv-ocr-scene/
+
+# Track only the selected production bundle.
+models/trained_ocr/*
+!models/trained_ocr/manifest.json
+!models/trained_ocr/machine12-0fda44ca8399aadd.pth
+!models/trained_ocr/machine3_onnx-d1def50b7a859ee8.onnx
+!models/trained_ocr/machine3_torchscript-3daeb54d20f29997.pt
+.claude/settings.local.json

@@ -21,6 +21,7 @@ Transfers go through ``gcloud storage``, which handles resumable multi-GB upload
 and needs no extra Python packages; authenticate once with ``gcloud auth login``
 (``--no-browser`` on a headless machine).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -41,6 +42,7 @@ RESULT_GLOBS = ("*.json", "*.jsonl")
 
 # --------------------------------------------------------------------------- config
 
+
 def load_config(bucket_override: Optional[str]) -> Dict[str, str]:
     cfg: Dict[str, str] = {
         "bucket": "",
@@ -52,7 +54,9 @@ def load_config(bucket_override: Optional[str]) -> Dict[str, str]:
         cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     bucket = bucket_override or os.environ.get("SURGERYOCR_GCS_BUCKET") or cfg["bucket"]
     if not bucket:
-        sys.exit("no bucket configured: set it in config/cloud.json, SURGERYOCR_GCS_BUCKET, or --bucket")
+        sys.exit(
+            "no bucket configured: set it in config/cloud.json, SURGERYOCR_GCS_BUCKET, or --bucket"
+        )
     if not bucket.startswith("gs://"):
         bucket = "gs://" + bucket
     cfg["bucket"] = bucket.rstrip("/")
@@ -62,24 +66,38 @@ def load_config(bucket_override: Optional[str]) -> Dict[str, str]:
 def gcloud_bin() -> str:
     exe = shutil.which("gcloud") or shutil.which("gcloud.cmd")
     if not exe:
-        sys.exit("gcloud not found on PATH. Run scripts/setup.sh (Linux) or install the Google Cloud SDK.")
+        sys.exit(
+            "gcloud not found on PATH. Run scripts/setup.sh (Linux) or install the Google Cloud SDK."
+        )
     return exe
 
 
 def gcloud(args: Sequence[str], capture: bool = False) -> subprocess.CompletedProcess:
     cmd = [gcloud_bin(), *args]
     return subprocess.run(
-        cmd, check=False, text=True, encoding="utf-8", errors="replace",
+        cmd,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=capture,
     )
 
 
 # --------------------------------------------------------------------------- listing
 
+
 def list_objects(bucket: str, prefix: str) -> List[Dict[str, str]]:
     """Return [{name, size}] for every object under ``prefix/``."""
     proc = gcloud(
-        ["storage", "objects", "list", f"{bucket}/{prefix}/**", "--format", "json(name,size)"],
+        [
+            "storage",
+            "objects",
+            "list",
+            f"{bucket}/{prefix}/**",
+            "--format",
+            "json(name,size)",
+        ],
         capture=True,
     )
     if proc.returncode != 0:
@@ -87,7 +105,11 @@ def list_objects(bucket: str, prefix: str) -> List[Dict[str, str]]:
             return []
         sys.exit(f"listing {bucket}/{prefix} failed:\n{proc.stderr.strip()}")
     rows = json.loads(proc.stdout or "[]")
-    out = [{"name": r["name"], "size": int(r.get("size", 0))} for r in rows if r["name"].startswith(prefix + "/")]
+    out = [
+        {"name": r["name"], "size": int(r.get("size", 0))}
+        for r in rows
+        if r["name"].startswith(prefix + "/")
+    ]
     return sorted(out, key=lambda r: r["name"])
 
 
@@ -100,7 +122,7 @@ def human(n: int) -> str:
 
 
 def rel_key(obj_name: str, prefix: str) -> str:
-    return obj_name[len(prefix) + 1:]
+    return obj_name[len(prefix) + 1 :]
 
 
 def select(keys: Iterable[str], patterns: Sequence[str], select_all: bool) -> List[str]:
@@ -114,14 +136,19 @@ def select(keys: Iterable[str], patterns: Sequence[str], select_all: bool) -> Li
         for pat in patterns:
             pat_posix = pat.replace("\\", "/")
             if pat_posix.startswith("data/"):
-                pat_posix = pat_posix[len("data/"):]
-            if pat_posix in key or fnmatch.fnmatch(key, pat_posix) or fnmatch.fnmatch(base, pat_posix):
+                pat_posix = pat_posix[len("data/") :]
+            if (
+                pat_posix in key
+                or fnmatch.fnmatch(key, pat_posix)
+                or fnmatch.fnmatch(base, pat_posix)
+            ):
                 chosen.append(key)
                 break
     return chosen
 
 
 # --------------------------------------------------------------------------- transfers
+
 
 def copy(src: str, dst: str, no_clobber: bool) -> bool:
     args = ["storage", "cp"]
@@ -137,7 +164,9 @@ def local_videos(paths: Sequence[str], data_dir: Path) -> List[Path]:
     for p in paths:
         path = Path(p)
         if path.is_dir():
-            found += sorted(x for x in path.iterdir() if x.suffix.lower() in VIDEO_SUFFIXES)
+            found += sorted(
+                x for x in path.iterdir() if x.suffix.lower() in VIDEO_SUFFIXES
+            )
         elif path.is_file():
             found.append(path)
         else:
@@ -155,11 +184,17 @@ def key_for(path: Path, data_dir: Path) -> str:
 
 # --------------------------------------------------------------------------- commands
 
+
 def cmd_list(cfg: Dict[str, str], args: argparse.Namespace) -> int:
-    for prefix, label in ((cfg["videos_prefix"], "videos"), (cfg["results_prefix"], "results")):
+    for prefix, label in (
+        (cfg["videos_prefix"], "videos"),
+        (cfg["results_prefix"], "results"),
+    ):
         rows = list_objects(cfg["bucket"], prefix)
         total = sum(r["size"] for r in rows)
-        print(f"{label}: {len(rows)} objects, {human(total)}  ({cfg['bucket']}/{prefix}/)")
+        print(
+            f"{label}: {len(rows)} objects, {human(total)}  ({cfg['bucket']}/{prefix}/)"
+        )
         if label == "results":
             # results are many small files; show one line per video directory
             dirs: Dict[str, int] = {}
@@ -180,7 +215,10 @@ def cmd_push(cfg: Dict[str, str], args: argparse.Namespace) -> int:
     if not videos:
         print("nothing to push")
         return 1
-    existing = {rel_key(r["name"], cfg["videos_prefix"]): r["size"] for r in list_objects(cfg["bucket"], cfg["videos_prefix"])}
+    existing = {
+        rel_key(r["name"], cfg["videos_prefix"]): r["size"]
+        for r in list_objects(cfg["bucket"], cfg["videos_prefix"])
+    }
     failed = 0
     for i, v in enumerate(videos, 1):
         key = key_for(v, data_dir)
@@ -198,7 +236,14 @@ def cmd_push(cfg: Dict[str, str], args: argparse.Namespace) -> int:
 
 
 def run_pipeline(video: Path, mode: str) -> bool:
-    cmd = [sys.executable, str(REPO / "run_pipeline.py"), "--video", str(video), "--mode", mode]
+    cmd = [
+        sys.executable,
+        str(REPO / "run_pipeline.py"),
+        "--video",
+        str(video),
+        "--mode",
+        mode,
+    ]
     print("   $ " + " ".join(cmd))
     return subprocess.run(cmd, cwd=REPO, check=False).returncode == 0
 
@@ -206,7 +251,9 @@ def run_pipeline(video: Path, mode: str) -> bool:
 def cmd_pull(cfg: Dict[str, str], args: argparse.Namespace) -> int:
     data_dir = REPO / cfg["data_dir"]
     rows = list_objects(cfg["bucket"], cfg["videos_prefix"])
-    keys = select((rel_key(r["name"], cfg["videos_prefix"]) for r in rows), args.names, args.all)
+    keys = select(
+        (rel_key(r["name"], cfg["videos_prefix"]) for r in rows), args.names, args.all
+    )
     sizes = {rel_key(r["name"], cfg["videos_prefix"]): r["size"] for r in rows}
     if not keys:
         print("no matching videos in the bucket (try `list`)")
@@ -220,7 +267,11 @@ def cmd_pull(cfg: Dict[str, str], args: argparse.Namespace) -> int:
             print("   already present with the same size, skipped download")
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if not copy(f"{cfg['bucket']}/{cfg['videos_prefix']}/{key}", str(dest), no_clobber=False):
+            if not copy(
+                f"{cfg['bucket']}/{cfg['videos_prefix']}/{key}",
+                str(dest),
+                no_clobber=False,
+            ):
                 print("   download failed")
                 failed.append(key)
                 continue
@@ -232,7 +283,10 @@ def cmd_pull(cfg: Dict[str, str], args: argparse.Namespace) -> int:
                 continue
             if args.upload_results:
                 push_results_for(cfg, dest, data_dir, force=True)
-    print(f"done, {len(keys) - len(failed)}/{len(keys)} ok" + (f", failed: {failed}" if failed else ""))
+    print(
+        f"done, {len(keys) - len(failed)}/{len(keys)} ok"
+        + (f", failed: {failed}" if failed else "")
+    )
     return 1 if failed else 0
 
 
@@ -246,7 +300,9 @@ def result_dir_for(video: Path, data_dir: Path) -> Path:
     return data_dir / video.stem
 
 
-def push_results_for(cfg: Dict[str, str], video: Path, data_dir: Path, force: bool) -> bool:
+def push_results_for(
+    cfg: Dict[str, str], video: Path, data_dir: Path, force: bool
+) -> bool:
     rdir = result_dir_for(video, data_dir)
     files = [f for g in RESULT_GLOBS for f in rdir.glob(g)]
     if not files:
@@ -280,7 +336,9 @@ def cmd_push_results(cfg: Dict[str, str], args: argparse.Namespace) -> int:
 def cmd_pull_results(cfg: Dict[str, str], args: argparse.Namespace) -> int:
     data_dir = REPO / cfg["data_dir"]
     rows = list_objects(cfg["bucket"], cfg["results_prefix"])
-    dirs = sorted({result_dir_key(rel_key(r["name"], cfg["results_prefix"])) for r in rows})
+    dirs = sorted(
+        {result_dir_key(rel_key(r["name"], cfg["results_prefix"])) for r in rows}
+    )
     chosen = select(dirs, args.names, args.all)
     if not chosen:
         print("no matching result directories in the bucket (try `list`)")
@@ -291,11 +349,17 @@ def cmd_pull_results(cfg: Dict[str, str], args: argparse.Namespace) -> int:
         dest = data_dir / PurePosixPath(d).name
         dest.mkdir(parents=True, exist_ok=True)
         print(f"{d}/ -> {dest}")
-        ok &= copy(f"{cfg['bucket']}/{cfg['results_prefix']}/{d}/*", str(dest), no_clobber=False)
+        ok &= copy(
+            f"{cfg['bucket']}/{cfg['results_prefix']}/{d}/*",
+            str(dest),
+            no_clobber=False,
+        )
     return 0 if ok else 1
 
 
-def requirement_pin(package: str, requirements: Path = REPO / "requirements.txt") -> Optional[str]:
+def requirement_pin(
+    package: str, requirements: Path = REPO / "requirements.txt"
+) -> Optional[str]:
     """The `package==X` version pinned in a requirements file (UTF-8 or UTF-16), or None."""
     raw = requirements.read_bytes()
     enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
@@ -312,7 +376,10 @@ def cmd_doctor(cfg: Dict[str, str], args: argparse.Namespace) -> int:
     def check(label: str, ok: bool, detail: str = "") -> None:
         nonlocal problems
         problems += 0 if ok else 1
-        print(f"  [{'ok' if ok else 'MISSING'}] {label}" + (f"  {detail}" if detail else ""))
+        print(
+            f"  [{'ok' if ok else 'MISSING'}] {label}"
+            + (f"  {detail}" if detail else "")
+        )
 
     print("python packages")
     for mod in ("cv2", "numpy", "torch", "easyocr", "h5py", "tqdm", "sklearn"):
@@ -325,64 +392,130 @@ def cmd_doctor(cfg: Dict[str, str], args: argparse.Namespace) -> int:
     if pin:
         try:
             import cv2  # noqa: WPS433
+
             want = ".".join(pin.split(".")[:3])
-            check(f"cv2 == {want} (pinned)", cv2.__version__ == want,
-                  "" if cv2.__version__ == want else f"found {cv2.__version__}; re-run scripts/setup.sh")
+            check(
+                f"cv2 == {want} (pinned)",
+                cv2.__version__ == want,
+                ""
+                if cv2.__version__ == want
+                else f"found {cv2.__version__}; re-run scripts/setup.sh",
+            )
         except Exception:  # noqa: BLE001
             pass
     try:
         import torch  # noqa: WPS433
-        check("CUDA available", torch.cuda.is_available(),
-              torch.cuda.get_device_name(0) if torch.cuda.is_available() else "OCR will run on CPU (slow)")
+
+        check(
+            "CUDA available",
+            torch.cuda.is_available(),
+            torch.cuda.get_device_name(0)
+            if torch.cuda.is_available()
+            else "OCR will run on CPU (slow)",
+        )
     except Exception:  # noqa: BLE001
         pass
 
     print("repository assets")
-    for rel in ("models/OCR_interface/simpleocr/best_crnn_model.pth", "data/roi_img_caches",
-                "config/rois.json", "config/machine_identity.json"):
+    for rel in (
+        "models/OCR_interface/simpleocr/best_crnn_model.pth",
+        "data/roi_img_caches",
+        "config/rois.json",
+        "config/machine_identity.json",
+    ):
         check(rel, (REPO / rel).exists())
 
     print("google cloud")
     exe = shutil.which("gcloud") or shutil.which("gcloud.cmd")
     check("gcloud on PATH", bool(exe), exe or "run scripts/setup.sh or install the SDK")
     if exe:
-        acct = gcloud(["auth", "list", "--filter", "status:ACTIVE", "--format", "value(account)"], capture=True)
+        acct = gcloud(
+            ["auth", "list", "--filter", "status:ACTIVE", "--format", "value(account)"],
+            capture=True,
+        )
         active = (acct.stdout or "").strip()
-        check("gcloud account", bool(active), active or "run: gcloud auth login --no-browser")
+        check(
+            "gcloud account",
+            bool(active),
+            active or "run: gcloud auth login --no-browser",
+        )
         probe = gcloud(["storage", "ls", cfg["bucket"]], capture=True)
-        check(f"bucket readable {cfg['bucket']}", probe.returncode == 0, (probe.stderr or "").strip().splitlines()[-1] if probe.returncode else "")
+        check(
+            f"bucket readable {cfg['bucket']}",
+            probe.returncode == 0,
+            (probe.stderr or "").strip().splitlines()[-1] if probe.returncode else "",
+        )
     print("all good" if not problems else f"{problems} problem(s)")
     return 1 if problems else 0
 
 
 # --------------------------------------------------------------------------- cli
 
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     # keep our progress lines in order with gcloud's own output when piped to a log
     sys.stdout.reconfigure(line_buffering=True)
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bucket", help="gs://bucket (default: config/cloud.json or $SURGERYOCR_GCS_BUCKET)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--bucket",
+        help="gs://bucket (default: config/cloud.json or $SURGERYOCR_GCS_BUCKET)",
+    )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("doctor", help="check packages, GPU, assets, gcloud auth and bucket access")
+    sub.add_parser(
+        "doctor", help="check packages, GPU, assets, gcloud auth and bucket access"
+    )
     sub.add_parser("list", help="show videos and result directories in the bucket")
 
-    p = sub.add_parser("push", help="upload videos (files or directories) to the bucket")
+    p = sub.add_parser(
+        "push", help="upload videos (files or directories) to the bucket"
+    )
     p.add_argument("paths", nargs="+", help="video files or directories under data/")
-    p.add_argument("--force", action="store_true", help="re-upload even if the object exists")
+    p.add_argument(
+        "--force", action="store_true", help="re-upload even if the object exists"
+    )
 
-    p = sub.add_parser("pull", help="download videos; --run analyses each one after download")
-    p.add_argument("names", nargs="*", help="video name, stem, key relative to data/, or glob")
+    p = sub.add_parser(
+        "pull", help="download videos; --run analyses each one after download"
+    )
+    p.add_argument(
+        "names", nargs="*", help="video name, stem, key relative to data/, or glob"
+    )
     p.add_argument("--all", action="store_true")
-    p.add_argument("--force", action="store_true", help="re-download even if the local file matches")
-    p.add_argument("--run", action="store_true", help="run run_pipeline.py on each video after download")
-    p.add_argument("--mode", default="ram", choices=["detail", "frame", "ram", "read"], help="run_pipeline.py --mode")
-    p.add_argument("--upload-results", action="store_true", help="with --run: push results to the bucket after each video")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="re-download even if the local file matches",
+    )
+    p.add_argument(
+        "--run",
+        action="store_true",
+        help="run run_pipeline.py on each video after download",
+    )
+    p.add_argument(
+        "--mode",
+        default="ram",
+        choices=["detail", "frame", "ram", "read"],
+        help="run_pipeline.py --mode",
+    )
+    p.add_argument(
+        "--upload-results",
+        action="store_true",
+        help="with --run: push results to the bucket after each video",
+    )
 
-    p = sub.add_parser("push-results", help="upload data/<video>/*.json* for the given videos")
+    p = sub.add_parser(
+        "push-results", help="upload data/<video>/*.json* for the given videos"
+    )
     p.add_argument("names", nargs="*", help="video files or directories")
     p.add_argument("--all", action="store_true")
-    p.add_argument("--force", action="store_true", help="overwrite result files already in the bucket")
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite result files already in the bucket",
+    )
 
     p = sub.add_parser("pull-results", help="download result directories into data/")
     p.add_argument("names", nargs="*", help="video stem or glob")
@@ -391,8 +524,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = ap.parse_args(argv)
     cfg = load_config(args.bucket)
     handler = {
-        "doctor": cmd_doctor, "list": cmd_list, "push": cmd_push, "pull": cmd_pull,
-        "push-results": cmd_push_results, "pull-results": cmd_pull_results,
+        "doctor": cmd_doctor,
+        "list": cmd_list,
+        "push": cmd_push,
+        "pull": cmd_pull,
+        "push-results": cmd_push_results,
+        "pull-results": cmd_pull_results,
     }[args.cmd]
     return handler(cfg, args)
 

@@ -56,12 +56,14 @@ def video_frame_generator(video_path: Path) -> VideoFrameStream:
     return VideoFrameStream(video_path)
 
 
-def ensure_frame_cache_for_video(video_file: Path, *, force: bool, jpeg_quality: int = 85) -> None:
+def ensure_frame_cache_for_video(
+    video_file: Path, *, force: bool, jpeg_quality: int = 85
+) -> None:
     video_name = video_file.stem
     # 寫入到與影片同層的 <video_name>/frame_cache，避免子資料夾情況下路徑錯置
     out_dir = video_file.parent / video_name / "frame_cache"
     out_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # 調試輸出：顯示實際寫入路徑
     print(f"📂 目標輸出路徑: {out_dir.absolute()}")
 
@@ -72,34 +74,38 @@ def ensure_frame_cache_for_video(video_file: Path, *, force: bool, jpeg_quality:
         if cap.isOpened():
             total_meta = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
-    except:
+    except Exception:
         pass
-        
+
     print(f"📊 影片元數據顯示總幀數: {total_meta}")
-    
-    pbar = tqdm(total=total_meta if total_meta > 0 else None, desc=f"建立frame_cache: {video_name}", unit="frame")
-    
+
+    pbar = tqdm(
+        total=total_meta if total_meta > 0 else None,
+        desc=f"建立frame_cache: {video_name}",
+        unit="frame",
+    )
+
     idx = 0
     write_count = 0
     fail_count = 0
     skip_count = 0
-    
+
     # 使用 generator 重構迴圈
     for idx, frame_bgr in video_frame_generator(video_file):
         out_file = out_dir / f"frame_{idx}.jpg"
-        
+
         if not out_file.exists() or force:
             # 使用 cv2.imencode + 文件寫入來避免中文路徑問題
             try:
                 # 編碼為 JPEG
                 encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)]
-                success, encoded_img = cv2.imencode('.jpg', frame_bgr, encode_param)
-                
+                success, encoded_img = cv2.imencode(".jpg", frame_bgr, encode_param)
+
                 if success:
                     # 直接寫入二進制數據，避免 cv2.imwrite 的路徑編碼問題
-                    with open(out_file, 'wb') as f:
+                    with open(out_file, "wb") as f:
                         f.write(encoded_img.tobytes())
-                    
+
                     write_count += 1
                     # 每 1000 幀驗證一次寫入
                     if write_count == 1 or write_count % 1000 == 0:
@@ -118,9 +124,9 @@ def ensure_frame_cache_for_video(video_file: Path, *, force: bool, jpeg_quality:
                     print(f"\n⚠️ 第 {idx} 幀寫入異常: {e}")
         else:
             skip_count += 1
-            
+
         pbar.update(1)
-        
+
     pbar.close()
     print(f"\n✓ 完成: {video_name}")
     print(f"  總幀數: {idx + 1}")
@@ -148,6 +154,7 @@ def get_frame_cache_dir(video: Path) -> Path:
     # 預設回傳 cand1 作為預期位置
     return cand1
 
+
 def _list_frame_files(video: Path) -> List[Path]:
     """列出完整幀快取檔案，並以數字幀索引排序（避免字串排序造成錯序）。"""
     cache_dir = get_frame_cache_dir(video)
@@ -165,6 +172,7 @@ def _list_frame_files(video: Path) -> List[Path]:
 
     return sorted(candidates, key=idx_key)
 
+
 # -------------------- Public API for iterate frames arrays --------------------
 def iterate_frames(video: Path) -> Iterator[Tuple[int, np.ndarray]]:
     """依幀索引遞增產生 (frame_idx, frame_bgr)。遇到不可讀檔案則跳過。"""
@@ -179,6 +187,7 @@ def iterate_frames(video: Path) -> Iterator[Tuple[int, np.ndarray]]:
             yield idx, frame_bgr
         except Exception:
             continue
+
 
 # -------------------- Public API for get video meta --------------------
 def get_video_meta(video: Path) -> Dict[str, Any]:
@@ -214,38 +223,61 @@ def get_video_meta(video: Path) -> Dict[str, Any]:
         pass
 
     return {
-        'cache_dir': cache_dir,
-        'has_cache': cache_dir.exists() and total_frames > 0,
-        'total_frames': total_frames,
-        'fps': fps,
-        'width': width,
-        'height': height,
+        "cache_dir": cache_dir,
+        "has_cache": cache_dir.exists() and total_frames > 0,
+        "total_frames": total_frames,
+        "fps": fps,
+        "width": width,
+        "height": height,
     }
 
+
 def main():
-    ap = argparse.ArgumentParser(description="建立 frame_cache（完整幀快取），供後續分析使用")
-    ap.add_argument("--video", required=True, type=Path, help="影片檔或包含多支影片的目錄")
+    ap = argparse.ArgumentParser(
+        description="建立 frame_cache（完整幀快取），供後續分析使用"
+    )
+    ap.add_argument(
+        "--video", required=True, type=Path, help="影片檔或包含多支影片的目錄"
+    )
     ap.add_argument("--force", action="store_true", help="強制重建（覆蓋既有快取）")
-    ap.add_argument("--jpeg-quality", type=int, default=85, help="完整幀 JPG 品質 (1-100，預設85；越低越快、檔案更小)")
+    ap.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=85,
+        help="完整幀 JPG 品質 (1-100，預設85；越低越快、檔案更小)",
+    )
     args = ap.parse_args()
 
     if args.video.is_file():
-        ensure_frame_cache_for_video(args.video, force=args.force, jpeg_quality=args.jpeg_quality)
+        ensure_frame_cache_for_video(
+            args.video, force=args.force, jpeg_quality=args.jpeg_quality
+        )
     elif args.video.is_dir():
         videos: List[Path] = []
-        for ext in ["*.mp4", "*.MP4", "*.avi", "*.AVI", "*.mov", "*.MOV", "*.mkv", "*.MKV"]:
+        for ext in [
+            "*.mp4",
+            "*.MP4",
+            "*.avi",
+            "*.AVI",
+            "*.mov",
+            "*.MOV",
+            "*.mkv",
+            "*.MKV",
+        ]:
             videos += list(args.video.glob(ext))
-        
+
         # 去重：Windows 不區分大小寫，可能會找到重複的文件
         videos = list(set(videos))
-        
+
         if not videos:
             print(f"⚠️ 未找到影片於: {args.video}")
             return
-        
+
         print(f"找到 {len(videos)} 個影片文件")
         for vf in sorted(videos):
-            ensure_frame_cache_for_video(vf, force=args.force, jpeg_quality=args.jpeg_quality)
+            ensure_frame_cache_for_video(
+                vf, force=args.force, jpeg_quality=args.jpeg_quality
+            )
     else:
         print(f"⚠️ 路徑不存在: {args.video}")
 

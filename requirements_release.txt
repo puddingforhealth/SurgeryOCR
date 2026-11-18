@@ -3,3 +3,6 @@ Pillow
 av==17.0.1
 # OpenCV is pinned: 5.0 decodes video to different pixels and changes OCR readings.
 opencv-python-headless==4.11.0.86
+
+# Dedicated machine-3 RGB OCR runtime
+onnxruntime==1.25.1; python_version >= '3.11'

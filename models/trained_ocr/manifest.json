@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "version": "2026.11.18.single.2",
+  "scene_characters": "+-0123456789. ",
+  "artifacts": {
+    "machine12": {
+      "file": "machine12-0fda44ca8399aadd.pth",
+      "sha256": "0fda44ca8399aadd437a37078f333b4f8c592c18085aa70362aed11e76a6abbc"
+    },
+    "machine3_onnx": {
+      "file": "machine3_onnx-d1def50b7a859ee8.onnx",
+      "sha256": "d1def50b7a859ee89cd8f24d6aea52f42208f6b8afca871f20933eaca7d7dfce"
+    },
+    "machine3_torchscript": {
+      "file": "machine3_torchscript-3daeb54d20f29997.pt",
+      "sha256": "3daeb54d20f299978d9df16506a9ca22f954689db817f9d65b8838ad8b165da3"
+    }
+  },
+  "machine12_evidence_sha256": "1fc51397dc15807459a4c8f5571274f3cfa92c5171b95b751a31f2f82dd7da3c",
+  "machine3_fit_plan_sha256": "2f582e8db364c148ef0b9278b6cb6fd0652dc3a4a3150f47f1e4a6370654b14e",
+  "machine3_dataset_sha256": "3e4d5c2ca7fea4e19650c89e647b6d7717341f471d299621bddc6700c2d23224",
+  "machine3_training_samples": 428,
+  "machine3_validation_samples": 120,
+  "machine3_independent_test_samples": 0,
+  "machine3_selected_epoch": 1,
+  "annotation_status": "assistant-reviewed; not independently human verified",
+  "acceptance_scope": "Research integration; development source videos are not untouched acceptance data",
+  "license_notice": "Retain PaddleOCR/RapidOCR and EasyOCR upstream attribution. Private images and fonts are not included.",
+  "machine12_route": "single_numeric",
+  "machine12_fit_manifest_sha256": "4c22c08948e8c82ca6063f6f62a2a1cddd02759df96705764ea496b638ef10da"
+}

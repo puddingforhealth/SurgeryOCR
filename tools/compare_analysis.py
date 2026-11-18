@@ -11,6 +11,7 @@ Usage:
 
 Exit code 0 means the two runs are equivalent.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -60,32 +61,47 @@ def compare_stage_analysis(base: Path, cand: Path, d: Diff, rtol: float) -> None
     if not bp.exists() and not cp.exists():
         return
     if bp.exists() != cp.exists():
-        d.add("stage_analysis.json", f"present in baseline={bp.exists()} candidate={cp.exists()}")
+        d.add(
+            "stage_analysis.json",
+            f"present in baseline={bp.exists()} candidate={cp.exists()}",
+        )
         return
 
     bj = json.loads(bp.read_text(encoding="utf-8"))
     cj = json.loads(cp.read_text(encoding="utf-8"))
 
     if bj.get("total_frames") != cj.get("total_frames"):
-        d.add("stage_analysis.total_frames", f"{bj.get('total_frames')} -> {cj.get('total_frames')}")
+        d.add(
+            "stage_analysis.total_frames",
+            f"{bj.get('total_frames')} -> {cj.get('total_frames')}",
+        )
 
     breg, creg = bj.get("regions", {}), cj.get("regions", {})
     for name in sorted(set(breg) | set(creg)):
         if name not in breg or name not in creg:
-            d.add(f"stage_analysis.regions[{name}]",
-                  f"only in {'baseline' if name in breg else 'candidate'}")
+            d.add(
+                f"stage_analysis.regions[{name}]",
+                f"only in {'baseline' if name in breg else 'candidate'}",
+            )
             continue
         bs, cs = breg[name], creg[name]
         if len(bs) != len(cs):
-            d.add(f"stage_analysis.regions[{name}]", f"segment count {len(bs)} -> {len(cs)}")
+            d.add(
+                f"stage_analysis.regions[{name}]",
+                f"segment count {len(bs)} -> {len(cs)}",
+            )
         for i, (b, c) in enumerate(zip(bs, cs)):
             for f in SEGMENT_EXACT:
                 if b.get(f) != c.get(f):
-                    d.add(f"stage_analysis.regions[{name}][{i}].{f}",
-                          f"{b.get(f)!r} -> {c.get(f)!r}")
+                    d.add(
+                        f"stage_analysis.regions[{name}][{i}].{f}",
+                        f"{b.get(f)!r} -> {c.get(f)!r}",
+                    )
             if not close(b.get("avg_rmse"), c.get("avg_rmse"), rtol):
-                d.add(f"stage_analysis.regions[{name}][{i}].avg_rmse",
-                      f"{b.get('avg_rmse')} -> {c.get('avg_rmse')} (rtol {rtol})")
+                d.add(
+                    f"stage_analysis.regions[{name}][{i}].avg_rmse",
+                    f"{b.get('avg_rmse')} -> {c.get('avg_rmse')} (rtol {rtol})",
+                )
 
 
 def record_key(rec: Dict) -> Tuple:
@@ -110,12 +126,16 @@ def compare_jsonl(bp: Path, cp: Path, label: str, d: Diff, rtol: float) -> None:
 
     for i, (b, c) in enumerate(zip(br, cr)):
         if record_key(b) != record_key(c):
-            d.add(f"{label}[{i}]", f"record identity {record_key(b)} -> {record_key(c)}")
+            d.add(
+                f"{label}[{i}]", f"record identity {record_key(b)} -> {record_key(c)}"
+            )
             continue
         for f in sorted(set(b) | set(c)):
             if f in FLOAT_FIELDS:
                 if not close(b.get(f), c.get(f), rtol):
-                    d.add(f"{label}[{i}].{f}", f"{b.get(f)} -> {c.get(f)} (rtol {rtol})")
+                    d.add(
+                        f"{label}[{i}].{f}", f"{b.get(f)} -> {c.get(f)} (rtol {rtol})"
+                    )
             elif b.get(f) != c.get(f):
                 bv, cv = b.get(f), c.get(f)
                 if isinstance(bv, list) and isinstance(cv, list) and len(bv) != len(cv):
@@ -125,12 +145,20 @@ def compare_jsonl(bp: Path, cp: Path, label: str, d: Diff, rtol: float) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Golden-regression comparison of two pipeline runs")
+    ap = argparse.ArgumentParser(
+        description="Golden-regression comparison of two pipeline runs"
+    )
     ap.add_argument("baseline", type=Path)
     ap.add_argument("candidate", type=Path)
-    ap.add_argument("--rtol", type=float, default=1e-6,
-                    help="relative tolerance for avg_rmse / confidence (default 1e-6)")
-    ap.add_argument("--max-report", type=int, default=25, help="max differences to print")
+    ap.add_argument(
+        "--rtol",
+        type=float,
+        default=1e-6,
+        help="relative tolerance for avg_rmse / confidence (default 1e-6)",
+    )
+    ap.add_argument(
+        "--max-report", type=int, default=25, help="max differences to print"
+    )
     ap.add_argument("--quiet", action="store_true", help="print only the verdict line")
     args = ap.parse_args()
 
@@ -145,12 +173,19 @@ def main() -> int:
     names = {p.name for p in args.baseline.glob("*_ocr_testing.jsonl")}
     names |= {p.name for p in args.candidate.glob("*_ocr_testing.jsonl")}
     for n in sorted(names):
-        compare_jsonl(args.baseline / n, args.candidate / n,
-                      n.replace("_ocr_testing.jsonl", ""), d, args.rtol)
+        compare_jsonl(
+            args.baseline / n,
+            args.candidate / n,
+            n.replace("_ocr_testing.jsonl", ""),
+            d,
+            args.rtol,
+        )
 
     if d.ok:
-        print(f"IDENTICAL  {args.baseline}  ==  {args.candidate}"
-              f"  ({len(names)} OCR region files, rtol={args.rtol})")
+        print(
+            f"IDENTICAL  {args.baseline}  ==  {args.candidate}"
+            f"  ({len(names)} OCR region files, rtol={args.rtol})"
+        )
         return 0
 
     if not args.quiet:

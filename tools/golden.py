@@ -7,6 +7,7 @@
 Outputs land in runs/<baseline|candidate>/<video_stem>/ plus a timing.json next to
 them, so wall-clock can be compared across phases without a profiler.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -23,9 +24,21 @@ MANIFEST = REPO / "tools" / "golden_videos.json"
 def run_one(python: str, video: Path, out_root: Path) -> float:
     t0 = time.perf_counter()
     proc = subprocess.run(
-        [python, str(REPO / "run_pipeline.py"), "--video", str(video),
-         "--mode", "ram", "--output-dir", str(out_root)],
-        cwd=REPO, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        [
+            python,
+            str(REPO / "run_pipeline.py"),
+            "--video",
+            str(video),
+            "--mode",
+            "ram",
+            "--output-dir",
+            str(out_root),
+        ],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     elapsed = time.perf_counter() - t0
     if proc.returncode != 0:
@@ -40,8 +53,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Golden-regression runner")
     ap.add_argument("action", choices=["baseline", "check"])
     ap.add_argument("--set", dest="which", default="fast", choices=["fast", "full"])
-    ap.add_argument("--python", default=sys.executable,
-                    help="interpreter that has torch+easyocr (default: current)")
+    ap.add_argument(
+        "--python",
+        default=sys.executable,
+        help="interpreter that has torch+easyocr (default: current)",
+    )
     ap.add_argument("--rtol", type=float, default=1e-6)
     args = ap.parse_args()
 
@@ -54,7 +70,9 @@ def main() -> int:
             print(f"  {m}")
         return 2
 
-    out_root = REPO / "runs" / ("baseline" if args.action == "baseline" else "candidate")
+    out_root = (
+        REPO / "runs" / ("baseline" if args.action == "baseline" else "candidate")
+    )
     base_root = REPO / "runs" / "baseline"
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -68,16 +86,27 @@ def main() -> int:
 
         if args.action == "check":
             cmp_proc = subprocess.run(
-                [args.python, str(REPO / "tools" / "compare_analysis.py"),
-                 str(base_root / v.stem), str(out_root / v.stem), "--rtol", str(args.rtol)],
-                cwd=REPO, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                [
+                    args.python,
+                    str(REPO / "tools" / "compare_analysis.py"),
+                    str(base_root / v.stem),
+                    str(out_root / v.stem),
+                    "--rtol",
+                    str(args.rtol),
+                ],
+                cwd=REPO,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             print("  " + (cmp_proc.stdout or "").strip().replace("\n", "\n  "))
             if cmp_proc.returncode != 0:
                 failures.append(v.stem)
 
     (out_root / "timing.json").write_text(
-        json.dumps(timings, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(timings, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     total = sum(timings.values())
     print(f"\ntotal wall {total:.1f}s  ->  {out_root / 'timing.json'}")

@@ -1,0 +1,7 @@
+numpy==1.26.4
+Pillow==12.1.1
+opencv-python-headless==4.11.0.86
+onnxruntime==1.25.1
+flatbuffers==25.12.19
+packaging==26.3
+protobuf==7.36.2
