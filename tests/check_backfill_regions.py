@@ -22,8 +22,6 @@ spec.loader.exec_module(tool)
 AS_BOX = (1738, 542, 1838, 640)  # machine 2
 STATUS_BOX = {1: (1628, 682, 1836, 718), 2: (1628, 664, 1836, 700)}
 CACHE = REPO / "data/roi_img_caches/machine_1_2"
-# STATUS panel showing Vent, cut from a real machine-2 video (2025-11-19, frame 9530).
-VENT_PANEL = cv2.imread(str(REPO / "tests/fixtures/status_vent_panel.png"))
 
 
 def paint_template(frame, box, template, ink, panel):
@@ -36,9 +34,15 @@ def paint_template(frame, box, template, ink, panel):
 
 
 def make_clip(
-    path, machine, as_frames=(), occlusion_frames=(), vent_frames=(), frames=12
+    path,
+    machine,
+    as_frames=(),
+    occlusion_frames=(),
+    vent_frames=(),
+    frames=12,
+    vent_panel=None,
 ):
-    """1080p clip: dark background, AS icon / Occlusion panel / real Vent panel on chosen frames."""
+    """1080p clip: dark background, AS icon / Occlusion panel / Vent panel on chosen frames."""
     as_icon = np.load(CACHE / "AS/1.npy")
     occlusion = np.load(CACHE / "STATUS/1.npy")
     with av.open(str(path), "w") as out:
@@ -61,7 +65,7 @@ def make_clip(
                 )
             if i in vent_frames:
                 x1, y1, x2, y2 = STATUS_BOX[machine]
-                frame[y1:y2, x1:x2] = VENT_PANEL
+                frame[y1:y2, x1:x2] = vent_panel
             video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
             for packet in stream.encode(video_frame):
                 out.mux(packet)
@@ -165,9 +169,33 @@ class BackfillTests(unittest.TestCase):
         self.assertEqual(tool.process(video, None, ["AS", "STATUS"])[0], "skip")
 
     def test_vent_is_not_tracked_only_occlusion(self):
-        video = self.root / "vent.mp4"
-        make_clip(video, 2, occlusion_frames=range(2, 4), vent_frames=range(4, 9))
-        folder = self.results("vent", machine=2)
+        panel = np.full((36, 208, 3), 190, dtype=np.uint8)
+        cv2.putText(
+            panel,
+            "Vent",
+            (66, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (20, 20, 20),
+            2,
+            cv2.LINE_AA,
+        )
+        self.assert_vent_excluded("synthetic", panel)
+
+        fixture = REPO / "tests/fixtures/status_vent_panel.png"
+        if fixture.is_file():
+            self.assert_vent_excluded("recorded", cv2.imread(str(fixture)))
+
+    def assert_vent_excluded(self, name, panel):
+        video = self.root / f"{name}.mp4"
+        make_clip(
+            video,
+            2,
+            occlusion_frames=range(2, 4),
+            vent_frames=range(4, 9),
+            vent_panel=panel,
+        )
+        folder = self.results(name, machine=2)
 
         status, message = tool.process(video, None, ["AS", "STATUS"])
         self.assertEqual(status, "ok", message)
